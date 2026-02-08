@@ -78,6 +78,8 @@ static void ui_init_task(void *arg)
 
 void app_main(void)
 {
+    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_ERROR);
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

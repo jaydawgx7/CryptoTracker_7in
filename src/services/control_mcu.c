@@ -64,7 +64,7 @@ esp_err_t control_mcu_set_brightness(uint8_t percent)
 
 esp_err_t control_mcu_set_buzzer(bool enabled)
 {
-    uint8_t command = enabled ? 0x15 : 0x16;
+    uint8_t command = enabled ? 0xF6 : 0xF7;
     esp_err_t err = control_mcu_send_command(command);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Buzzer write failed: %d", err);
@@ -75,14 +75,14 @@ esp_err_t control_mcu_set_buzzer(bool enabled)
 
 esp_err_t control_mcu_buzzer_beep(uint16_t duration_ms)
 {
-    esp_err_t err = control_mcu_send_command(0x15);
+    esp_err_t err = control_mcu_send_command(0xF6);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Buzzer start failed: %d", err);
         return err;
     }
 
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
-    err = control_mcu_send_command(0x16);
+    err = control_mcu_send_command(0xF7);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Buzzer stop failed: %d", err);
     }

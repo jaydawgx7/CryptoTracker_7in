@@ -41,7 +41,7 @@
 
 // Working timing configuration for CrowPanel Advance 7" (800x480)
 // Key settings: 21MHz PCLK with PLL240M, bounce buffer, pclk_active_neg
-#define CT_LCD_PCLK_HZ 21000000
+#define CT_LCD_PCLK_HZ 16000000
 #define CT_LCD_HSYNC_PW 4
 #define CT_LCD_HSYNC_BP 40
 #define CT_LCD_HSYNC_FP 40

@@ -6,17 +6,22 @@
 
 #include "services/alert_manager.h"
 #include "ui/ui_nav.h"
+#include "ui/ui_theme.h"
 
 static lv_obj_t *s_active_list = NULL;
 static lv_obj_t *s_log_list = NULL;
 static lv_obj_t *s_toast = NULL;
 static lv_timer_t *s_toast_timer = NULL;
+static lv_obj_t *s_screen = NULL;
+static const ui_theme_colors_t *s_theme = NULL;
 
 static void build_list_item(lv_obj_t *list, const char *text, lv_color_t color)
 {
+    uint32_t row_bg = s_theme ? s_theme->surface : 0x151A24;
+
     lv_obj_t *row = lv_obj_create(list);
     lv_obj_set_width(row, 760);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x151A24), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(row_bg), 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_left(row, 8, 0);
     lv_obj_set_style_pad_right(row, 8, 0);
@@ -42,7 +47,7 @@ void ui_alerts_show_toast(const char *text)
     if (!s_toast) {
         s_toast = lv_obj_create(lv_layer_top());
         lv_obj_set_size(s_toast, 260, 40);
-        lv_obj_set_style_bg_color(s_toast, lv_color_hex(0x1A1D26), 0);
+        lv_obj_set_style_bg_color(s_toast, lv_color_hex(s_theme ? s_theme->surface : 0x1A1D26), 0);
         lv_obj_set_style_border_width(s_toast, 0, 0);
         lv_obj_set_style_radius(s_toast, 8, 0);
         lv_obj_set_style_pad_left(s_toast, 12, 0);
@@ -53,7 +58,7 @@ void ui_alerts_show_toast(const char *text)
 
         lv_obj_t *label = lv_label_create(s_toast);
         lv_label_set_text(label, text);
-        lv_obj_set_style_text_color(label, lv_color_hex(0xE6E6E6), 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(s_theme ? s_theme->text_primary : 0xE6E6E6), 0);
         lv_obj_center(label);
     } else {
         lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
@@ -71,6 +76,9 @@ void ui_alerts_show_toast(const char *text)
 
 void ui_alerts_refresh(void)
 {
+    if (!s_screen || lv_scr_act() != s_screen) {
+        return;
+    }
     if (!s_active_list || !s_log_list) {
         return;
     }
@@ -127,36 +135,38 @@ void ui_alerts_refresh(void)
 lv_obj_t *ui_alerts_screen_create(void)
 {
     lv_obj_t *screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0F1117), 0);
+    s_screen = screen;
+    s_theme = ui_theme_get();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(s_theme ? s_theme->bg : 0x0F1117), 0);
     lv_obj_set_style_pad_top(screen, UI_NAV_HEIGHT, 0);
 
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "Alerts");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(s_theme ? s_theme->accent : 0xE6E6E6), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 12);
 
     lv_obj_t *active_label = lv_label_create(screen);
     lv_label_set_text(active_label, "Active Alerts");
-    lv_obj_set_style_text_color(active_label, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(active_label, LV_ALIGN_TOP_LEFT, 16, 50);
+    lv_obj_set_style_text_color(active_label, lv_color_hex(s_theme ? s_theme->text_muted : 0x9AA1AD), 0);
+    lv_obj_align(active_label, LV_ALIGN_TOP_LEFT, 16, 55);
 
     s_active_list = lv_obj_create(screen);
     lv_obj_set_size(s_active_list, 760, 140);
-    lv_obj_align(s_active_list, LV_ALIGN_TOP_LEFT, 16, 70);
-    lv_obj_set_style_bg_color(s_active_list, lv_color_hex(0x0F1117), 0);
+    lv_obj_align(s_active_list, LV_ALIGN_TOP_LEFT, 16, 75);
+    lv_obj_set_style_bg_color(s_active_list, lv_color_hex(s_theme ? s_theme->bg : 0x0F1117), 0);
     lv_obj_set_style_border_width(s_active_list, 0, 0);
     lv_obj_set_flex_flow(s_active_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(s_active_list, LV_SCROLLBAR_MODE_AUTO);
 
     lv_obj_t *log_label = lv_label_create(screen);
     lv_label_set_text(log_label, "Recent Triggers");
-    lv_obj_set_style_text_color(log_label, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 16, 220);
+    lv_obj_set_style_text_color(log_label, lv_color_hex(s_theme ? s_theme->text_muted : 0x9AA1AD), 0);
+    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 16, 225);
 
     s_log_list = lv_obj_create(screen);
     lv_obj_set_size(s_log_list, 760, 140);
-    lv_obj_align(s_log_list, LV_ALIGN_TOP_LEFT, 16, 240);
-    lv_obj_set_style_bg_color(s_log_list, lv_color_hex(0x0F1117), 0);
+    lv_obj_align(s_log_list, LV_ALIGN_TOP_LEFT, 16, 245);
+    lv_obj_set_style_bg_color(s_log_list, lv_color_hex(s_theme ? s_theme->bg : 0x0F1117), 0);
     lv_obj_set_style_border_width(s_log_list, 0, 0);
     lv_obj_set_flex_flow(s_log_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(s_log_list, LV_SCROLLBAR_MODE_AUTO);

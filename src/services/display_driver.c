@@ -24,7 +24,7 @@ static lv_disp_draw_buf_t s_draw_buf;
 static StaticTask_t s_lvgl_task_buf;
 static StackType_t s_lvgl_stack[16384 / sizeof(StackType_t)] DRAM_ATTR;
 
-#define DISP_BUF_LINES 10
+#define DISP_BUF_LINES 40
 #define CT_DISPLAY_TEST_PATTERN 0
 
 #ifndef CT_LVGL_TASK_ENABLE
@@ -101,7 +101,7 @@ static void lvgl_task(void *arg)
     while (true) {
         if (display_driver_lock(100)) {
 #if CT_LVGL_TASK_TICK
-            lv_tick_inc(5);
+            lv_tick_inc(10);
 #endif
 #if CT_LVGL_HANDLER_ENABLE
     #if CT_LVGL_HANDLER_IN_TASK
@@ -141,8 +141,18 @@ esp_err_t display_driver_init(void)
 #if !CT_LVGL_SKIP_DISPLAY
     size_t buf_pixels = CT_LCD_H_RES * DISP_BUF_LINES;
     size_t buf_bytes = buf_pixels * sizeof(lv_color_t);
-    lv_color_t *buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    lv_color_t *buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    lv_color_t *buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    lv_color_t *buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (!buf1) {
+        ESP_LOGW(TAG, "PSRAM buffer alloc failed, falling back to internal RAM");
+        buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+
+    if (!buf2) {
+        ESP_LOGW(TAG, "Second PSRAM buffer alloc failed, falling back to internal RAM");
+        buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
 
     if (!buf1) {
         ESP_LOGE(TAG, "LVGL buffer allocation failed (bytes=%u)", (unsigned)buf_bytes);
@@ -218,6 +228,7 @@ esp_err_t display_driver_init(void)
     s_disp_drv.offset_x = 0;
     s_disp_drv.offset_y = -40;
     s_disp_drv.flush_cb = lvgl_flush_cb;
+    s_disp_drv.full_refresh = 0;
     s_disp_drv.draw_buf = &s_draw_buf;
     s_disp_drv.user_data = s_panel;
 
@@ -280,7 +291,7 @@ esp_err_t display_driver_init(void)
         .name = "lv_handler"
     };
     ESP_ERROR_CHECK(esp_timer_create(&handler_args, &s_lvgl_handler_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_lvgl_handler_timer, 5000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_lvgl_handler_timer, 16));
 #endif
 
     ESP_LOGI(TAG, "Display initialized");

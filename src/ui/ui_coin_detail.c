@@ -15,6 +15,7 @@
 #include "ui/ui.h"
 #include "ui/ui_nav.h"
 
+
 typedef enum {
     RANGE_1H = 0,
     RANGE_24H,
@@ -62,13 +63,30 @@ static lv_color_t percent_color(double change)
     return lv_color_hex(0x9AA1AD);
 }
 
+static void format_trim_zeros(char *buf)
+{
+    char *dot = strchr(buf, '.');
+    if (!dot) {
+        return;
+    }
+
+    char *end = buf + strlen(buf) - 1;
+    while (end > dot && *end == '0') {
+        *end = '\0';
+        end--;
+    }
+    if (end == dot) {
+        *end = '\0';
+    }
+}
+
 static void format_percent(double change, char *buf, size_t len)
 {
     const char *arrow = "";
     if (change > 0.05) {
-        arrow = "^";
+        arrow = LV_SYMBOL_UP;
     } else if (change < -0.05) {
-        arrow = "v";
+        arrow = LV_SYMBOL_DOWN;
     }
     snprintf(buf, len, "%s%.2f%%", arrow, fabs(change));
 }
@@ -108,12 +126,83 @@ static void format_usd(double price, char *buf, size_t len)
     }
 
     if (price >= 1.0) {
-        snprintf(buf, len, "$%.2f", price);
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%.2f", price);
+
+        const char *dot = strchr(tmp, '.');
+        size_t int_len = dot ? (size_t)(dot - tmp) : strlen(tmp);
+        size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+        size_t needed = 1 + int_len + commas + (dot ? strlen(dot) : 0) + 1;
+        if (needed > len) {
+            snprintf(buf, len, "$%.2f", price);
+            return;
+        }
+
+        size_t pos = 0;
+        buf[pos++] = '$';
+        for (size_t i = 0; i < int_len; i++) {
+            if (i > 0 && ((int_len - i) % 3) == 0) {
+                buf[pos++] = ',';
+            }
+            buf[pos++] = tmp[i];
+        }
+        if (dot) {
+            strncpy(buf + pos, dot, len - pos);
+        } else {
+            buf[pos] = '\0';
+        }
         return;
     }
 
     if (price >= 0.01) {
         snprintf(buf, len, "$%.6f", price);
+        return;
+    }
+
+    int decimals = 6;
+    snprintf(buf, len, "$%.*f", decimals, price);
+}
+
+static void format_usd_price(double price, char *buf, size_t len)
+{
+    if (price <= 0.0) {
+        snprintf(buf, len, "$0.00");
+        return;
+    }
+
+    if (price >= 1.0) {
+        int decimals = price >= 1000.0 ? 2 : 4;
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%.*f", decimals, price);
+
+        const char *dot = strchr(tmp, '.');
+        size_t int_len = dot ? (size_t)(dot - tmp) : strlen(tmp);
+        size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+        size_t needed = 1 + int_len + commas + (dot ? strlen(dot) : 0) + 1;
+        if (needed > len) {
+            snprintf(buf, len, "$%.*f", decimals, price);
+            return;
+        }
+
+        size_t pos = 0;
+        buf[pos++] = '$';
+        for (size_t i = 0; i < int_len; i++) {
+            if (i > 0 && ((int_len - i) % 3) == 0) {
+                buf[pos++] = ',';
+            }
+            buf[pos++] = tmp[i];
+        }
+        if (dot) {
+            strncpy(buf + pos, dot, len - pos);
+        } else {
+            buf[pos] = '\0';
+        }
+        return;
+    }
+
+    if (price >= 0.01) {
+        snprintf(buf, len, "$%.6f", price);
+        format_trim_zeros(buf);
         return;
     }
 
@@ -133,7 +222,7 @@ static void update_header_values(void)
     lv_label_set_text(s_title, title);
 
     char price[32];
-    format_usd(coin->price, price, sizeof(price));
+    format_usd_price(coin->price, price, sizeof(price));
     lv_label_set_text(s_price, price);
 
     update_chip(0, coin->change_1h);

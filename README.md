@@ -28,6 +28,9 @@ pio device monitor -b 115200
 - I2C uses GPIO15 (SDA) and GPIO16 (SCL).
 - Touch controller is GT911-class on address `0x5D` with INT on GPIO1.
 - Brightness, speaker enable, and buzzer are controlled by the V1.3 control MCU at `0x30`.
+- V1.3 control MCU commands:
+	- Brightness: 0 = max, 244 = min, 245 = off.
+	- Buzzer: 246 = on, 247 = off.
 
 ## Display + Touch (Working Configuration)
 
@@ -35,7 +38,7 @@ This project uses the ESP-IDF RGB panel driver with a tuned timing profile for t
 
 ### Display
 - Panel: 800x480, RGB interface (`esp_lcd_panel_rgb`).
-- Pixel clock: 21 MHz with PLL240M source.
+- Pixel clock: 16 MHz with PLL240M source.
 - Bounce buffer: enabled (10 * H_RES) to avoid rolling.
 - LVGL vertical compensation: `ver_res = 480 + 40`, `offset_y = -40`.
 

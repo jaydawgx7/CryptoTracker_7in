@@ -20,14 +20,11 @@ static const char *TAG = "touch_driver";
 static lv_indev_t *s_indev = NULL;
 static lv_indev_drv_t s_indev_drv;
 static bool s_touched = false;
-static bool s_last_reported_touched = false;
 static lv_point_t s_point = {0};
 static uint16_t s_touch_max_x = CT_LCD_H_RES;
 static uint16_t s_touch_max_y = CT_LCD_V_RES;
 static volatile bool s_int_pending = false;
 static int64_t s_last_read_us = 0;
-static int64_t s_last_log_us = 0;
-static int64_t s_last_poll_log_us = 0;
 static esp_lcd_panel_io_handle_t s_touch_io = NULL;
 static esp_lcd_touch_handle_t s_touch = NULL;
 static esp_lcd_touch_io_gt911_config_t s_gt911_cfg = {0};
@@ -134,13 +131,6 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 
     esp_err_t err = esp_lcd_touch_read_data(s_touch);
     if (err != ESP_OK) {
-#if CT_TOUCH_LOG
-        int64_t now_log = esp_timer_get_time();
-        if ((now_log - s_last_poll_log_us) > 1000000) {
-            s_last_poll_log_us = now_log;
-            ESP_LOGW(TAG, "GT911 read failed: %d", err);
-        }
-#endif
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
@@ -149,13 +139,6 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
     uint8_t touch_cnt = 0;
     err = esp_lcd_touch_get_data(s_touch, touch_data, &touch_cnt, 1);
     if (err != ESP_OK) {
-#if CT_TOUCH_LOG
-        int64_t now_log = esp_timer_get_time();
-        if ((now_log - s_last_poll_log_us) > 1000000) {
-            s_last_poll_log_us = now_log;
-            ESP_LOGW(TAG, "GT911 get data failed: %d", err);
-        }
-#endif
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
@@ -168,52 +151,26 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         s_touched = false;
     }
 
-#if CT_TOUCH_LOG
-    int64_t now_log = esp_timer_get_time();
-    if ((now_log - s_last_poll_log_us) > 1000000) {
-        s_last_poll_log_us = now_log;
-        int int_level = -1;
-#if CT_TOUCH_INT_GPIO >= 0
-        int_level = gpio_get_level(CT_TOUCH_INT_GPIO);
-#endif
-        ESP_LOGI(TAG, "GT911 points=%u int=%d", (unsigned)touch_cnt, int_level);
-    }
-#endif
-
     data->state = s_touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     data->point = s_point;
 
-#if CT_TOUCH_LOG
-    {
-        int64_t now_log = esp_timer_get_time();
-        if (s_touched) {
-            if (!s_last_reported_touched || (now_log - s_last_log_us) > 200000) {
-                s_last_log_us = now_log;
-                ESP_LOGI(TAG, "Touch: x=%u y=%u", (unsigned)s_point.x, (unsigned)s_point.y);
-            }
-        } else if (s_last_reported_touched) {
-            ESP_LOGI(TAG, "Touch: released");
-        }
-        s_last_reported_touched = s_touched;
-    }
-#endif
-
 }
 
+#if CT_TOUCH_USE_INT
 static void IRAM_ATTR touch_isr_handler(void *arg)
 {
     (void)arg;
     s_int_pending = true;
 }
+#endif
 
 esp_err_t touch_driver_init(void)
 {
 #if !CT_TOUCH_ENABLED
-    ESP_LOGW(TAG, "Touch disabled by config");
+    // Touch disabled by config
     return ESP_OK;
 #endif
-    ESP_LOGI(TAG, "Touch config: addr=0x%02X use_int=%d int_gpio=%d poll_fallback_ms=%d",
-             CT_TOUCH_I2C_ADDR, CT_TOUCH_USE_INT, CT_TOUCH_INT_GPIO, CT_TOUCH_POLL_FALLBACK_MS);
+    // Touch config
     ESP_ERROR_CHECK(i2c_bus_init());
     control_mcu_touch_enable();
     touch_int_wakeup_pulse();
@@ -260,7 +217,7 @@ esp_err_t touch_driver_init(void)
 
         esp_err_t err = gpio_install_isr_service(0);
         if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "GPIO ISR service init failed: %d", err);
+            // GPIO ISR service init failed: err
         }
         gpio_isr_handler_add(CT_TOUCH_INT_GPIO, touch_isr_handler, NULL);
     }
@@ -271,11 +228,11 @@ esp_err_t touch_driver_init(void)
     s_indev_drv.read_cb = touch_read_cb;
     s_indev = lv_indev_drv_register(&s_indev_drv);
     if (!s_indev) {
-        ESP_LOGE(TAG, "LVGL indev register failed");
+        // LVGL indev register failed
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "GT911 touch initialized (esp_lcd_touch)");
+    // GT911 touch initialized
     return ESP_OK;
 }
 

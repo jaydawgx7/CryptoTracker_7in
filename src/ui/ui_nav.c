@@ -1,6 +1,7 @@
 #include "ui/ui_nav.h"
 
 #include "ui/ui.h"
+#include "ui/ui_theme.h"
 
 static void nav_event(lv_event_t *e)
 {
@@ -36,15 +37,21 @@ static void anim_set_transform_zoom(void *obj, int32_t value)
 
 static lv_obj_t *create_nav_button(lv_obj_t *parent, const char *label, ui_nav_page_t page, bool active)
 {
+	const ui_theme_colors_t *theme = ui_theme_get();
+	uint32_t active_bg = theme ? theme->nav_active_bg : 0x222222;
+	uint32_t inactive_bg = theme ? theme->nav_inactive_bg : 0x212121;
+	uint32_t active_text = theme ? theme->nav_text_active : 0x00FE8F;
+	uint32_t inactive_text = theme ? theme->nav_text_inactive : 0x00FE8F;
+
 	lv_obj_t *btn = lv_btn_create(parent);
 	lv_obj_set_size(btn, 180, 40);
 	lv_obj_set_style_radius(btn, 10, 0);
-	lv_obj_set_style_bg_color(btn, active ? lv_color_hex(0x2A3142) : lv_color_hex(0x151A24), 0);
+	lv_obj_set_style_bg_color(btn, active ? lv_color_hex(active_bg) : lv_color_hex(inactive_bg), 0);
 	lv_obj_add_event_cb(btn, nav_event, LV_EVENT_CLICKED, (void *)(uintptr_t)page);
 
 	lv_obj_t *text = lv_label_create(btn);
 	lv_label_set_text(text, label);
-	lv_obj_set_style_text_color(text, active ? lv_color_hex(0xE6E6E6) : lv_color_hex(0x9AA1AD), 0);
+	lv_obj_set_style_text_color(text, active ? lv_color_hex(active_text) : lv_color_hex(inactive_text), 0);
 	lv_obj_center(text);
 	return btn;
 }
@@ -59,10 +66,14 @@ void ui_nav_set_alert_badge(bool visible)
 
 void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 {
+	const ui_theme_colors_t *theme = ui_theme_get();
+	uint32_t nav_bg = theme ? theme->bg : 0x0F1117;
+	uint32_t indicator_color = theme ? theme->accent : 0x00FE8F;
+
 	lv_obj_t *nav = lv_obj_create(screen);
 	lv_obj_set_size(nav, 800, 56);
 	lv_obj_align(nav, LV_ALIGN_TOP_MID, 0, 0);
-	lv_obj_set_style_bg_color(nav, lv_color_hex(0x0F131B), 0);
+	lv_obj_set_style_bg_color(nav, lv_color_hex(nav_bg), 0);
 	lv_obj_set_style_border_width(nav, 0, 0);
 	lv_obj_set_style_pad_left(nav, 10, 0);
 	lv_obj_set_style_pad_right(nav, 10, 0);
@@ -90,7 +101,7 @@ void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 		lv_obj_t *indicator = lv_obj_create(nav);
 		lv_obj_add_flag(indicator, LV_OBJ_FLAG_FLOATING);
 		lv_obj_set_size(indicator, 70, 4);
-		lv_obj_set_style_bg_color(indicator, lv_color_hex(0x4F77FF), 0);
+		lv_obj_set_style_bg_color(indicator, lv_color_hex(indicator_color), 0);
 		lv_obj_set_style_border_width(indicator, 0, 0);
 		lv_obj_set_style_radius(indicator, 2, 0);
 		lv_obj_update_layout(nav);

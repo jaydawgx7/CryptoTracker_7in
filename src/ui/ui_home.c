@@ -8,10 +8,14 @@
 
 #include "lvgl.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "ui/ui.h"
 #include "ui/ui_nav.h"
 
 #include "services/nvs_store.h"
+#include "services/control_mcu.h"
 #include "services/coingecko_client.h"
 
 #define SPARKLINE_POINTS 28
@@ -23,6 +27,9 @@
 #ifndef CT_SPARKLINE_ENABLE
 #define CT_SPARKLINE_ENABLE 0
 #endif
+
+#define HOME_MODAL_TEXT_COLOR 0x00FE8F
+#define HOME_MODAL_BTN_BG 0x222222
 
 static const app_state_t *s_state = NULL;
 static lv_obj_t *s_table_body = NULL;
@@ -39,11 +46,53 @@ static lv_obj_t *s_keyboard = NULL;
 static lv_obj_t *s_holdings_field = NULL;
 static lv_obj_t *s_alert_low_field = NULL;
 static lv_obj_t *s_alert_high_field = NULL;
+static lv_obj_t *s_buzzer_slider = NULL;
+static lv_obj_t *s_buzzer_value = NULL;
+static esp_err_t s_buzzer_last_err = ESP_OK;
 static lv_obj_t *s_sort_buttons[6] = {0};
-static lv_obj_t *s_sort_dir_btn = NULL;
-static lv_obj_t *s_sort_dir_label = NULL;
+static lv_obj_t *s_sort_labels[6] = {0};
+static lv_obj_t *s_holdings_pill = NULL;
 static sort_field_t s_sort_field = SORT_SYMBOL;
 static bool s_sort_desc = false;
+static lv_obj_t *s_screen = NULL;
+static bool s_long_press_active = false;
+
+typedef struct {
+    lv_obj_t *row;
+    lv_obj_t *label_symbol;
+    lv_obj_t *label_price;
+    lv_obj_t *label_1h;
+    lv_obj_t *label_24h;
+    lv_obj_t *label_7d;
+    lv_obj_t *label_hold;
+    lv_obj_t *label_value;
+    lv_timer_t *flash_timer;
+    size_t coin_index;
+    int last_display_index;
+    uint32_t row_bg_color;
+    char text_symbol[16];
+    char text_price[32];
+    char text_1h[16];
+    char text_24h[16];
+    char text_7d[16];
+    char text_hold[24];
+    char text_value[32];
+    uint32_t color_price;
+    uint32_t color_1h;
+    uint32_t color_24h;
+    uint32_t color_7d;
+    uint32_t color_hold;
+    uint32_t color_value;
+} home_row_t;
+
+static home_row_t s_rows[MAX_WATCHLIST] = {0};
+static size_t s_row_count = 0;
+static double s_last_prices[MAX_WATCHLIST] = {0};
+
+static const char *s_sort_texts[6] = {"Sym", "Price", "1h", "24h", "7d", "Value"};
+static const char *s_holdings_text = "Holdings";
+
+static const lv_coord_t s_col_widths[7] = {80, 130, 70, 70, 70, 120, 160};
 
 static lv_color_t color_pos = {0};
 static lv_color_t color_neg = {0};
@@ -54,12 +103,31 @@ static bool s_offline = false;
 static void show_holdings_modal(size_t index);
 static void show_alerts_modal(size_t index);
 static void format_usd(double price, char *buf, size_t len);
+static void format_usd_price(double price, char *buf, size_t len);
 static void format_holdings(double value, char *buf, size_t len);
 static void field_focus_event(lv_event_t *e);
+static void field_blur_event(lv_event_t *e);
 static void persist_state(void);
 static void add_coin_nav_event(lv_event_t *e);
 static double compute_total_value(void);
 static void update_add_button_state(bool offline);
+static home_row_t *find_row_by_obj(lv_obj_t *row);
+static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, size_t display_index);
+static void buzzer_slider_event(lv_event_t *e);
+static void buzzer_test_event(lv_event_t *e);
+static void buzzer_result_cb(void *arg);
+static void buzzer_task(void *arg);
+
+static void style_modal_button(lv_obj_t *btn)
+{
+    lv_obj_set_style_bg_color(btn, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+}
+
+static void style_modal_label(lv_obj_t *label)
+{
+    lv_obj_set_style_text_color(label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
+}
 
 static void toast_hide_cb(lv_timer_t *timer)
 {
@@ -132,8 +200,11 @@ static double compute_total_value(void)
     return total;
 }
 
-void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_age_s, bool offline)
+void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_age_s, bool offline, bool rate_limited)
 {
+    if (!s_screen || lv_scr_act() != s_screen) {
+        return;
+    }
     if (!s_status_label) {
         return;
     }
@@ -154,14 +225,20 @@ void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_a
     }
 
     char status[96];
-    if (offline) {
+    if (rate_limited) {
+        snprintf(status, sizeof(status), "Rate limit | %s | Updated %lus | %s", wifi_buf, (unsigned long)updated_age_s, total_buf);
+    } else if (offline) {
         snprintf(status, sizeof(status), "Offline | %s | Updated %lus | %s", wifi_buf, (unsigned long)updated_age_s, total_buf);
     } else {
         snprintf(status, sizeof(status), "%s | Updated %lus | %s", wifi_buf, (unsigned long)updated_age_s, total_buf);
     }
 
     lv_label_set_text(s_status_label, status);
-    lv_obj_set_style_text_color(s_status_label, offline ? lv_color_hex(0xD6A16A) : lv_color_hex(0x9AA1AD), 0);
+    if (rate_limited) {
+        lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xD6A16A), 0);
+    } else {
+        lv_obj_set_style_text_color(s_status_label, offline ? lv_color_hex(0xD6A16A) : lv_color_hex(0x9AA1AD), 0);
+    }
 
     if (offline_changed) {
         update_add_button_state(offline);
@@ -196,6 +273,8 @@ static void close_modal(void)
     s_holdings_field = NULL;
     s_alert_low_field = NULL;
     s_alert_high_field = NULL;
+    s_buzzer_slider = NULL;
+    s_buzzer_value = NULL;
 }
 
 static void detail_close_event(lv_event_t *e)
@@ -297,10 +376,11 @@ static lv_obj_t *create_numeric_field(lv_obj_t *parent, const char *placeholder)
     lv_textarea_set_max_length(ta, 20);
     lv_obj_set_width(ta, 220);
     lv_obj_set_style_bg_color(ta, lv_color_hex(0x11151F), 0);
-    lv_obj_set_style_text_color(ta, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_set_style_text_color(ta, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_set_style_border_width(ta, 0, 0);
     lv_obj_add_event_cb(ta, field_focus_event, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(ta, field_focus_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ta, field_blur_event, LV_EVENT_DEFOCUSED, NULL);
     return ta;
 }
 
@@ -315,11 +395,13 @@ static void ensure_keyboard(lv_obj_t *ta)
     }
 
     if (!s_keyboard) {
-        s_keyboard = lv_keyboard_create(s_modal);
+        s_keyboard = lv_keyboard_create(lv_layer_top());
         lv_keyboard_set_mode(s_keyboard, LV_KEYBOARD_MODE_NUMBER);
-        lv_obj_set_size(s_keyboard, 780, 160);
-        lv_obj_align(s_keyboard, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_set_size(s_keyboard, 800, 220);
+        lv_obj_align(s_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
     }
+    lv_obj_clear_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
     lv_keyboard_set_textarea(s_keyboard, ta);
 }
 
@@ -327,6 +409,17 @@ static void field_focus_event(lv_event_t *e)
 {
     lv_obj_t *ta = lv_event_get_target(e);
     ensure_keyboard(ta);
+}
+
+static void field_blur_event(lv_event_t *e)
+{
+    (void)e;
+#if !CT_KEYBOARD_ENABLE
+    return;
+#endif
+    if (s_keyboard) {
+        lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static bool parse_optional_double(const char *text, double *out)
@@ -397,6 +490,66 @@ static void cancel_modal_event(lv_event_t *e)
     close_modal();
 }
 
+static void buzzer_slider_event(lv_event_t *e)
+{
+    if (!s_buzzer_slider || !s_buzzer_value) {
+        return;
+    }
+
+    (void)e;
+    int32_t value = lv_slider_get_value(s_buzzer_slider);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%dms", (int)value);
+    lv_label_set_text(s_buzzer_value, buf);
+}
+
+static void buzzer_test_event(lv_event_t *e)
+{
+    (void)e;
+    if (!s_buzzer_slider) {
+        return;
+    }
+
+    int32_t value = lv_slider_get_value(s_buzzer_slider);
+    if (value < 25) {
+        value = 25;
+    } else if (value > 1000) {
+        value = 1000;
+    }
+
+    int32_t *duration = malloc(sizeof(*duration));
+    if (!duration) {
+        return;
+    }
+    *duration = value;
+    xTaskCreate(buzzer_task, "buzzer_test", 2048, duration, 4, NULL);
+}
+
+static void buzzer_task(void *arg)
+{
+    int32_t duration = 300;
+    if (arg) {
+        duration = *((int32_t *)arg);
+        free(arg);
+    }
+
+    control_mcu_set_buzzer(true);
+    s_buzzer_last_err = control_mcu_buzzer_beep((uint16_t)duration);
+    if (s_buzzer_last_err != ESP_OK) {
+        lv_async_call(buzzer_result_cb, NULL);
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void buzzer_result_cb(void *arg)
+{
+    (void)arg;
+    if (s_buzzer_last_err != ESP_OK) {
+        show_toast("Buzzer failed");
+    }
+}
+
 static void show_holdings_modal(size_t index)
 {
     if (!s_state || index >= s_state->watchlist_count) {
@@ -413,12 +566,12 @@ static void show_holdings_modal(size_t index)
     snprintf(title, sizeof(title), "Edit Holdings (%s)", coin->symbol);
     lv_obj_t *label = lv_label_create(card);
     lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_22, 0);
 
     lv_obj_t *field_label = lv_label_create(card);
     lv_label_set_text(field_label, "Quantity (up to 8 decimals)");
-    lv_obj_set_style_text_color(field_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_set_style_text_color(field_label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_align(field_label, LV_ALIGN_TOP_LEFT, 0, 48);
 
     s_holdings_field = create_numeric_field(card, "0.0");
@@ -427,22 +580,25 @@ static void show_holdings_modal(size_t index)
     char buf_hold[32];
     format_holdings(coin->holdings, buf_hold, sizeof(buf_hold));
     lv_textarea_set_text(s_holdings_field, buf_hold);
-    ensure_keyboard(s_holdings_field);
 
     lv_obj_t *save_btn = lv_btn_create(card);
     lv_obj_set_size(save_btn, 120, 36);
     lv_obj_align(save_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_event_cb(save_btn, save_holdings_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(save_btn);
     lv_obj_t *save_label = lv_label_create(save_btn);
     lv_label_set_text(save_label, "Save");
+    style_modal_label(save_label);
     lv_obj_center(save_label);
 
     lv_obj_t *cancel_btn = lv_btn_create(card);
     lv_obj_set_size(cancel_btn, 120, 36);
     lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_RIGHT, -132, 0);
     lv_obj_add_event_cb(cancel_btn, cancel_modal_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(cancel_btn);
     lv_obj_t *cancel_label = lv_label_create(cancel_btn);
     lv_label_set_text(cancel_label, "Cancel");
+    style_modal_label(cancel_label);
     lv_obj_center(cancel_label);
 }
 
@@ -456,18 +612,18 @@ static void show_alerts_modal(size_t index)
     s_active_index = index;
 
     const coin_t *coin = &s_state->watchlist[index];
-    lv_obj_t *card = create_modal_container_size(520, 320);
+    lv_obj_t *card = create_modal_container_size(520, 380);
 
     char title[64];
     snprintf(title, sizeof(title), "Alerts (%s)", coin->symbol);
     lv_obj_t *label = lv_label_create(card);
     lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_22, 0);
 
     lv_obj_t *low_label = lv_label_create(card);
     lv_label_set_text(low_label, "Low price (optional)");
-    lv_obj_set_style_text_color(low_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_set_style_text_color(low_label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_align(low_label, LV_ALIGN_TOP_LEFT, 0, 48);
 
     s_alert_low_field = create_numeric_field(card, "Disabled");
@@ -475,11 +631,44 @@ static void show_alerts_modal(size_t index)
 
     lv_obj_t *high_label = lv_label_create(card);
     lv_label_set_text(high_label, "High price (optional)");
-    lv_obj_set_style_text_color(high_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_set_style_text_color(high_label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_align(high_label, LV_ALIGN_TOP_LEFT, 0, 130);
 
     s_alert_high_field = create_numeric_field(card, "Disabled");
     lv_obj_align(s_alert_high_field, LV_ALIGN_TOP_LEFT, 0, 160);
+
+    lv_obj_t *buzzer_label = lv_label_create(card);
+    lv_label_set_text(buzzer_label, "Buzzer test");
+    lv_obj_set_style_text_color(buzzer_label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
+    lv_obj_align(buzzer_label, LV_ALIGN_TOP_LEFT, 0, 212);
+
+    s_buzzer_slider = lv_slider_create(card);
+    lv_obj_set_size(s_buzzer_slider, 300, 16);
+    lv_obj_align(s_buzzer_slider, LV_ALIGN_TOP_LEFT, 0, 240);
+    lv_obj_set_style_bg_color(s_buzzer_slider, lv_color_hex(HOME_MODAL_BTN_BG), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_buzzer_slider, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_buzzer_slider, lv_color_hex(HOME_MODAL_TEXT_COLOR), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_buzzer_slider, lv_color_hex(HOME_MODAL_TEXT_COLOR), LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_buzzer_slider, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(s_buzzer_slider, 0, LV_PART_KNOB);
+    lv_slider_set_range(s_buzzer_slider, 25, 1000);
+    lv_slider_set_value(s_buzzer_slider, 250, LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_buzzer_slider, buzzer_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_buzzer_value = lv_label_create(card);
+    lv_obj_set_style_text_color(s_buzzer_value, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
+    lv_obj_align(s_buzzer_value, LV_ALIGN_TOP_LEFT, 320, 234);
+    lv_label_set_text(s_buzzer_value, "250ms");
+
+    lv_obj_t *test_btn = lv_btn_create(card);
+    lv_obj_set_size(test_btn, 140, 36);
+    lv_obj_align(test_btn, LV_ALIGN_TOP_LEFT, 0, 268);
+    lv_obj_add_event_cb(test_btn, buzzer_test_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(test_btn);
+    lv_obj_t *test_label = lv_label_create(test_btn);
+    lv_label_set_text(test_label, "Buzzer Test");
+    style_modal_label(test_label);
+    lv_obj_center(test_label);
 
     if (coin->alert_low > 0.0) {
         char buf_low[32];
@@ -493,22 +682,24 @@ static void show_alerts_modal(size_t index)
         lv_textarea_set_text(s_alert_high_field, buf_high + 1);
     }
 
-    ensure_keyboard(s_alert_low_field);
-
     lv_obj_t *save_btn = lv_btn_create(card);
     lv_obj_set_size(save_btn, 120, 36);
     lv_obj_align(save_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_event_cb(save_btn, save_alerts_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(save_btn);
     lv_obj_t *save_label = lv_label_create(save_btn);
     lv_label_set_text(save_label, "Save");
+    style_modal_label(save_label);
     lv_obj_center(save_label);
 
     lv_obj_t *cancel_btn = lv_btn_create(card);
     lv_obj_set_size(cancel_btn, 120, 36);
     lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_RIGHT, -132, 0);
     lv_obj_add_event_cb(cancel_btn, cancel_modal_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(cancel_btn);
     lv_obj_t *cancel_label = lv_label_create(cancel_btn);
     lv_label_set_text(cancel_label, "Cancel");
+    style_modal_label(cancel_label);
     lv_obj_center(cancel_label);
 }
 
@@ -529,7 +720,7 @@ static void show_actions_modal(size_t index)
     snprintf(title, sizeof(title), "%s (%s)", coin->name, coin->symbol);
     lv_obj_t *label = lv_label_create(card);
     lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(HOME_MODAL_TEXT_COLOR), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_22, 0);
 
     lv_obj_t *grid = lv_obj_create(card);
@@ -544,45 +735,59 @@ static void show_actions_modal(size_t index)
     lv_obj_t *edit_btn = lv_btn_create(grid);
     lv_obj_set_size(edit_btn, 200, 42);
     lv_obj_add_event_cb(edit_btn, action_edit_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(edit_btn);
     lv_obj_t *edit_label = lv_label_create(edit_btn);
     lv_label_set_text(edit_label, "Edit Holdings");
+    style_modal_label(edit_label);
     lv_obj_center(edit_label);
 
     lv_obj_t *alert_btn = lv_btn_create(grid);
     lv_obj_set_size(alert_btn, 200, 42);
     lv_obj_add_event_cb(alert_btn, action_alerts_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(alert_btn);
     lv_obj_t *alert_label = lv_label_create(alert_btn);
     lv_label_set_text(alert_label, "Alerts");
+    style_modal_label(alert_label);
     lv_obj_center(alert_label);
 
     lv_obj_t *pin_btn = lv_btn_create(grid);
     lv_obj_set_size(pin_btn, 200, 42);
     lv_obj_add_event_cb(pin_btn, action_pin_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(pin_btn);
     lv_obj_t *pin_label = lv_label_create(pin_btn);
     lv_label_set_text(pin_label, coin->pinned ? "Unpin" : "Pin to Top");
+    style_modal_label(pin_label);
     lv_obj_center(pin_label);
 
     lv_obj_t *remove_btn = lv_btn_create(grid);
     lv_obj_set_size(remove_btn, 200, 42);
     lv_obj_add_event_cb(remove_btn, action_remove_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(remove_btn);
     lv_obj_t *remove_label = lv_label_create(remove_btn);
     lv_label_set_text(remove_label, "Remove");
+    style_modal_label(remove_label);
     lv_obj_center(remove_label);
 
     lv_obj_t *close_btn = lv_btn_create(card);
     lv_obj_set_size(close_btn, 100, 36);
     lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_event_cb(close_btn, detail_close_event, LV_EVENT_CLICKED, NULL);
+    style_modal_button(close_btn);
 
     lv_obj_t *close_label = lv_label_create(close_btn);
     lv_label_set_text(close_label, "Close");
+    style_modal_label(close_label);
     lv_obj_center(close_label);
 }
 
 static void row_event_cb(lv_event_t *e)
 {
-    size_t index = (size_t)(uintptr_t)lv_event_get_user_data(e);
     lv_event_code_t code = lv_event_get_code(e);
+    size_t index = (size_t)(uintptr_t)lv_event_get_user_data(e);
+    home_row_t *row = find_row_by_obj(lv_event_get_target(e));
+    if (row) {
+        index = row->coin_index;
+    }
 
     if (s_offline) {
         s_ignore_click = false;
@@ -590,18 +795,52 @@ static void row_event_cb(lv_event_t *e)
     }
 
     if (code == LV_EVENT_LONG_PRESSED) {
+        s_long_press_active = true;
         s_ignore_click = true;
         show_actions_modal(index);
+        lv_indev_t *indev = lv_indev_get_act();
+        if (indev) {
+            lv_indev_reset(indev, NULL);
+            lv_indev_wait_release(indev);
+        }
+        lv_event_stop_bubbling(e);
+        lv_event_stop_processing(e);
         return;
     }
 
-    if (code == LV_EVENT_CLICKED) {
-        if (s_ignore_click) {
+    if (code == LV_EVENT_PRESS_LOST) {
+        if (s_long_press_active) {
+            s_long_press_active = false;
             s_ignore_click = false;
+            return;
+        }
+    }
+
+    if (code == LV_EVENT_CLICKED) {
+        if (s_ignore_click || s_long_press_active) {
+            s_ignore_click = false;
+            s_long_press_active = false;
+            lv_event_stop_bubbling(e);
+            lv_event_stop_processing(e);
             return;
         }
         ui_show_coin_detail(index);
     }
+}
+
+static home_row_t *find_row_by_obj(lv_obj_t *row)
+{
+    if (!row) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < s_row_count; i++) {
+        if (s_rows[i].row == row) {
+            return &s_rows[i];
+        }
+    }
+
+    return NULL;
 }
 
 static void format_trim_zeros(char *buf)
@@ -629,7 +868,88 @@ static void format_usd(double price, char *buf, size_t len)
     }
 
     if (price >= 1.0) {
-        snprintf(buf, len, "$%.2f", price);
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%.2f", price);
+
+        const char *dot = strchr(tmp, '.');
+        size_t int_len = dot ? (size_t)(dot - tmp) : strlen(tmp);
+        size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+        size_t needed = 1 + int_len + commas + (dot ? strlen(dot) : 0) + 1;
+        if (needed > len) {
+            snprintf(buf, len, "$%.2f", price);
+            return;
+        }
+
+        size_t pos = 0;
+        buf[pos++] = '$';
+        for (size_t i = 0; i < int_len; i++) {
+            if (i > 0 && ((int_len - i) % 3) == 0) {
+                buf[pos++] = ',';
+            }
+            buf[pos++] = tmp[i];
+        }
+        if (dot) {
+            strncpy(buf + pos, dot, len - pos);
+        } else {
+            buf[pos] = '\0';
+        }
+        return;
+    }
+
+    if (price >= 0.01) {
+        snprintf(buf, len, "$%.6f", price);
+        format_trim_zeros(buf);
+        return;
+    }
+
+    int first_nonzero = 0;
+    double scaled = price;
+    while (scaled < 1.0 && first_nonzero < 10) {
+        scaled *= 10.0;
+        first_nonzero++;
+    }
+
+    int decimals = first_nonzero + 1;
+    if (decimals > 10) {
+        decimals = 10;
+    }
+
+    snprintf(buf, len, "$%.*f", decimals, price);
+}
+static void format_usd_price(double price, char *buf, size_t len)
+{
+    if (price <= 0.0) {
+        snprintf(buf, len, "$0.00");
+        return;
+    }
+
+    if (price >= 1.0) {
+        int decimals = price >= 1000.0 ? 2 : 4;
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%.*f", decimals, price);
+
+        const char *dot = strchr(tmp, '.');
+        size_t int_len = dot ? (size_t)(dot - tmp) : strlen(tmp);
+        size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+        size_t needed = 1 + int_len + commas + (dot ? strlen(dot) : 0) + 1;
+        if (needed > len) {
+            snprintf(buf, len, "$%.*f", decimals, price);
+            return;
+        }
+
+        size_t pos = 0;
+        buf[pos++] = '$';
+        for (size_t i = 0; i < int_len; i++) {
+            if (i > 0 && ((int_len - i) % 3) == 0) {
+                buf[pos++] = ',';
+            }
+            buf[pos++] = tmp[i];
+        }
+        if (dot) {
+            strncpy(buf + pos, dot, len - pos);
+        } else {
+            buf[pos] = '\0';
+        }
         return;
     }
 
@@ -656,17 +976,40 @@ static void format_usd(double price, char *buf, size_t len)
 
 static void format_holdings(double value, char *buf, size_t len)
 {
-    snprintf(buf, len, "%.8f", value);
-    format_trim_zeros(buf);
+    char tmp[48];
+    snprintf(tmp, sizeof(tmp), "%.8f", value);
+    format_trim_zeros(tmp);
+
+    const char *dot = strchr(tmp, '.');
+    size_t int_len = dot ? (size_t)(dot - tmp) : strlen(tmp);
+    size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+    size_t needed = int_len + commas + (dot ? strlen(dot) : 0) + 1;
+    if (needed > len) {
+        snprintf(buf, len, "%s", tmp);
+        return;
+    }
+
+    size_t pos = 0;
+    for (size_t i = 0; i < int_len; i++) {
+        if (i > 0 && ((int_len - i) % 3) == 0) {
+            buf[pos++] = ',';
+        }
+        buf[pos++] = tmp[i];
+    }
+    if (dot) {
+        strncpy(buf + pos, dot, len - pos);
+    } else {
+        buf[pos] = '\0';
+    }
 }
 
 static void format_percent(double change, char *buf, size_t len)
 {
     const char *arrow = "";
     if (change > 0.05) {
-        arrow = "^";
+        arrow = LV_SYMBOL_UP;
     } else if (change < -0.05) {
-        arrow = "v";
+        arrow = LV_SYMBOL_DOWN;
     }
 
     snprintf(buf, len, "%s%.2f%%", arrow, fabs(change));
@@ -683,17 +1026,185 @@ static lv_color_t percent_color(double change)
     return color_neutral;
 }
 
-static lv_obj_t *create_cell(lv_obj_t *parent, const char *text, lv_coord_t width, lv_color_t color)
+static lv_obj_t *create_cell(lv_obj_t *parent, const char *text, lv_coord_t width, lv_color_t color, lv_text_align_t align)
 {
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text);
     lv_obj_set_width(label, width);
     lv_obj_set_style_text_color(label, color, 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_align(label, align, 0);
     return label;
 }
 
+static void set_label_text_if_changed(lv_obj_t *label, char *cache, size_t cache_len, const char *text)
+{
+    if (!label || !cache || cache_len == 0 || !text) {
+        return;
+    }
+
+    if (strncmp(cache, text, cache_len) == 0) {
+        return;
+    }
+
+    lv_label_set_text(label, text);
+    strncpy(cache, text, cache_len - 1);
+    cache[cache_len - 1] = '\0';
+}
+
+static void set_label_color_if_changed(lv_obj_t *label, uint32_t *cache, lv_color_t color)
+{
+    if (!label || !cache) {
+        return;
+    }
+
+    uint32_t value = lv_color_to32(color);
+    if (*cache == value) {
+        return;
+    }
+
+    lv_obj_set_style_text_color(label, color, 0);
+    *cache = value;
+}
+
+static void price_flash_end_cb(lv_timer_t *timer)
+{
+    home_row_t *row = (home_row_t *)timer->user_data;
+    if (row && row->label_price) {
+        lv_color_t value_color = s_offline ? color_stale : lv_color_hex(0xE6E6E6);
+        lv_obj_set_style_text_color(row->label_price, value_color, 0);
+    }
+    if (row) {
+        row->flash_timer = NULL;
+    }
+    lv_timer_del(timer);
+}
+
+static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, size_t display_index)
+{
+    if (!row || !coin) {
+        return;
+    }
+
+    if (!row->row) {
+        row->row = lv_obj_create(s_table_body);
+        lv_obj_set_size(row->row, 780, 36);
+        lv_obj_set_style_border_width(row->row, 0, 0);
+        lv_obj_set_style_pad_left(row->row, 0, 0);
+        lv_obj_set_style_pad_right(row->row, 0, 0);
+        lv_obj_set_style_pad_top(row->row, 6, 0);
+        lv_obj_set_style_pad_bottom(row->row, 6, 0);
+        lv_obj_set_flex_flow(row->row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row->row, 6, 0);
+        lv_obj_clear_flag(row->row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(row->row, LV_SCROLLBAR_MODE_OFF);
+
+        row->label_symbol = create_cell(row->row, "", s_col_widths[0], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_LEFT);
+        row->label_price = create_cell(row->row, "", s_col_widths[1], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_RIGHT);
+        row->label_1h = create_cell(row->row, "", s_col_widths[2], color_neutral, LV_TEXT_ALIGN_RIGHT);
+        row->label_24h = create_cell(row->row, "", s_col_widths[3], color_neutral, LV_TEXT_ALIGN_RIGHT);
+        row->label_7d = create_cell(row->row, "", s_col_widths[4], color_neutral, LV_TEXT_ALIGN_RIGHT);
+        row->label_hold = create_cell(row->row, "", s_col_widths[5], lv_color_hex(0xC5CBD6), LV_TEXT_ALIGN_RIGHT);
+        row->label_value = create_cell(row->row, "", s_col_widths[6], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_RIGHT);
+
+        row->coin_index = SIZE_MAX;
+        row->last_display_index = -1;
+        row->row_bg_color = 0;
+        row->text_symbol[0] = '\0';
+        row->text_price[0] = '\0';
+        row->text_1h[0] = '\0';
+        row->text_24h[0] = '\0';
+        row->text_7d[0] = '\0';
+        row->text_hold[0] = '\0';
+        row->text_value[0] = '\0';
+        row->color_price = 0;
+        row->color_1h = 0;
+        row->color_24h = 0;
+        row->color_7d = 0;
+        row->color_hold = 0;
+        row->color_value = 0;
+    }
+
+    lv_obj_clear_flag(row->row, LV_OBJ_FLAG_HIDDEN);
+    if (row->last_display_index != (int)display_index) {
+        lv_color_t bg = (display_index % 2 == 0) ? lv_color_hex(0x0F1117) : lv_color_hex(0x11151F);
+        uint32_t bg_value = lv_color_to32(bg);
+        if (row->row_bg_color != bg_value) {
+            lv_obj_set_style_bg_color(row->row, bg, 0);
+            row->row_bg_color = bg_value;
+        }
+        row->last_display_index = (int)display_index;
+    }
+
+    if (row->coin_index != coin_index) {
+        lv_obj_remove_event_cb(row->row, row_event_cb);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)coin_index);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_LONG_PRESSED, (void *)(uintptr_t)coin_index);
+        row->coin_index = coin_index;
+    }
+
+    char buf_price[32];
+    char buf_1h[16];
+    char buf_24h[16];
+    char buf_7d[16];
+    char buf_hold[24];
+    char buf_value[32];
+
+    format_usd(coin->price, buf_price, sizeof(buf_price));
+    format_percent(coin->change_1h, buf_1h, sizeof(buf_1h));
+    format_percent(coin->change_24h, buf_24h, sizeof(buf_24h));
+    format_percent(coin->change_7d, buf_7d, sizeof(buf_7d));
+    format_holdings(coin->holdings, buf_hold, sizeof(buf_hold));
+    format_usd(coin->price * coin->holdings, buf_value, sizeof(buf_value));
+
+    set_label_text_if_changed(row->label_symbol, row->text_symbol, sizeof(row->text_symbol), coin->symbol);
+    set_label_text_if_changed(row->label_price, row->text_price, sizeof(row->text_price), buf_price);
+    set_label_text_if_changed(row->label_1h, row->text_1h, sizeof(row->text_1h), buf_1h);
+    set_label_text_if_changed(row->label_24h, row->text_24h, sizeof(row->text_24h), buf_24h);
+    set_label_text_if_changed(row->label_7d, row->text_7d, sizeof(row->text_7d), buf_7d);
+    set_label_text_if_changed(row->label_hold, row->text_hold, sizeof(row->text_hold), buf_hold);
+    set_label_text_if_changed(row->label_value, row->text_value, sizeof(row->text_value), buf_value);
+
+    lv_color_t value_color = s_offline ? color_stale : lv_color_hex(0xE6E6E6);
+    lv_color_t holdings_color = s_offline ? color_stale : lv_color_hex(0xC5CBD6);
+    lv_color_t pct_1h_color = s_offline ? color_neutral : percent_color(coin->change_1h);
+    lv_color_t pct_24h_color = s_offline ? color_neutral : percent_color(coin->change_24h);
+    lv_color_t pct_7d_color = s_offline ? color_neutral : percent_color(coin->change_7d);
+
+    set_label_color_if_changed(row->label_value, &row->color_value, value_color);
+    set_label_color_if_changed(row->label_hold, &row->color_hold, holdings_color);
+    set_label_color_if_changed(row->label_1h, &row->color_1h, pct_1h_color);
+    set_label_color_if_changed(row->label_24h, &row->color_24h, pct_24h_color);
+    set_label_color_if_changed(row->label_7d, &row->color_7d, pct_7d_color);
+
+    if (!s_offline) {
+        double last_price = (coin_index < MAX_WATCHLIST) ? s_last_prices[coin_index] : 0.0;
+        double diff = coin->price - last_price;
+        if (last_price > 0.0 && fabs(diff) > 0.0000001) {
+            lv_color_t flash = diff > 0.0 ? color_pos : color_neg;
+            lv_obj_set_style_text_color(row->label_price, flash, 0);
+            row->color_price = lv_color_to32(flash);
+            if (row->flash_timer) {
+                lv_timer_del(row->flash_timer);
+            }
+            row->flash_timer = lv_timer_create(price_flash_end_cb, 2000, row);
+        } else {
+            set_label_color_if_changed(row->label_price, &row->color_price, value_color);
+        }
+    } else {
+        if (row->flash_timer) {
+            lv_timer_del(row->flash_timer);
+            row->flash_timer = NULL;
+        }
+        set_label_color_if_changed(row->label_price, &row->color_price, value_color);
+    }
+
+    if (coin_index < MAX_WATCHLIST) {
+        s_last_prices[coin_index] = coin->price;
+    }
+}
+
+#if CT_SPARKLINE_ENABLE
 static void set_sparkline_placeholder(lv_obj_t *chart, lv_chart_series_t *series, double price)
 {
     if (!chart || !series) {
@@ -761,17 +1272,11 @@ static void set_sparkline_data(lv_obj_t *chart, lv_chart_series_t *series, const
     lv_obj_set_style_line_color(chart, line_color, LV_PART_ITEMS);
     lv_chart_refresh(chart);
 }
+#endif
 
+#if CT_SPARKLINE_ENABLE
 static lv_obj_t *create_sparkline_cell(lv_obj_t *parent, const coin_t *coin)
 {
-#if !CT_SPARKLINE_ENABLE
-    lv_obj_t *placeholder = lv_label_create(parent);
-    lv_label_set_text(placeholder, "-");
-    lv_obj_set_width(placeholder, 90);
-    lv_obj_set_style_text_color(placeholder, lv_color_hex(0x6B717B), 0);
-    lv_obj_set_style_text_align(placeholder, LV_TEXT_ALIGN_CENTER, 0);
-    return placeholder;
-#else
     lv_obj_t *chart = lv_chart_create(parent);
     lv_obj_set_size(chart, 90, 24);
     lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, 0);
@@ -796,8 +1301,8 @@ static lv_obj_t *create_sparkline_cell(lv_obj_t *parent, const coin_t *coin)
     }
 
     return chart;
-#endif
 }
+#endif
 
 static int compare_coins(const coin_t *a, const coin_t *b)
 {
@@ -872,10 +1377,16 @@ static void update_sort_buttons(void)
         bool active = (i == s_sort_field);
         lv_obj_set_style_bg_color(s_sort_buttons[i], active ? lv_color_hex(0x2A3142) : lv_color_hex(0x1A1D26), 0);
         lv_obj_set_style_text_color(s_sort_buttons[i], active ? lv_color_hex(0xE6E6E6) : lv_color_hex(0x9AA1AD), 0);
-    }
-
-    if (s_sort_dir_label) {
-        lv_label_set_text(s_sort_dir_label, s_sort_desc ? "Desc" : "Asc");
+        if (s_sort_labels[i]) {
+            char label[16];
+            if (active) {
+                const char *arrow = s_sort_desc ? LV_SYMBOL_DOWN : LV_SYMBOL_UP;
+                snprintf(label, sizeof(label), "%s %s", s_sort_texts[i], arrow);
+            } else {
+                snprintf(label, sizeof(label), "%s", s_sort_texts[i]);
+            }
+            lv_label_set_text(s_sort_labels[i], label);
+        }
     }
 }
 
@@ -887,14 +1398,6 @@ static void sort_button_event(lv_event_t *e)
     } else {
         s_sort_field = field;
     }
-    update_sort_buttons();
-    ui_home_refresh();
-}
-
-static void sort_dir_event(lv_event_t *e)
-{
-    (void)e;
-    s_sort_desc = !s_sort_desc;
     update_sort_buttons();
     ui_home_refresh();
 }
@@ -912,26 +1415,28 @@ void ui_home_set_state(const app_state_t *state)
 
 void ui_home_refresh(void)
 {
+    if (!s_screen || lv_scr_act() != s_screen) {
+        return;
+    }
     if (!s_table_body) {
         return;
     }
 
-    lv_obj_clean(s_table_body);
-    s_empty_label = NULL;
-
-    if (!s_empty_label) {
-        s_empty_label = lv_label_create(s_table_body);
-        lv_label_set_text(s_empty_label, "Watchlist empty. Add coins to get started.");
-        lv_obj_set_style_text_color(s_empty_label, lv_color_hex(0x5C626B), 0);
-        lv_obj_align(s_empty_label, LV_ALIGN_CENTER, 0, 0);
-    }
-
     if (!s_state || s_state->watchlist_count == 0) {
-        lv_obj_clear_flag(s_empty_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_empty_label) {
+            lv_obj_clear_flag(s_empty_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        for (size_t i = 0; i < s_row_count; i++) {
+            if (s_rows[i].row) {
+                lv_obj_add_flag(s_rows[i].row, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
         return;
     }
 
-    lv_obj_add_flag(s_empty_label, LV_OBJ_FLAG_HIDDEN);
+    if (s_empty_label) {
+        lv_obj_add_flag(s_empty_label, LV_OBJ_FLAG_HIDDEN);
+    }
 
     size_t count = s_state->watchlist_count;
     size_t indices[MAX_WATCHLIST] = {0};
@@ -943,54 +1448,24 @@ void ui_home_refresh(void)
     for (size_t i = 0; i < count; i++) {
         const coin_t *coin = &s_state->watchlist[indices[i]];
         size_t coin_index = indices[i];
+        if (i >= s_row_count) {
+            s_row_count = i + 1;
+        }
+        update_row(&s_rows[i], coin, coin_index, i);
+    }
 
-        lv_obj_t *row = lv_obj_create(s_table_body);
-        lv_obj_set_size(row, 780, 36);
-        lv_obj_set_style_bg_color(row, (i % 2 == 0) ? lv_color_hex(0x121620) : lv_color_hex(0x101218), 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_left(row, 8, 0);
-        lv_obj_set_style_pad_right(row, 8, 0);
-        lv_obj_set_style_pad_top(row, 6, 0);
-        lv_obj_set_style_pad_bottom(row, 6, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_add_event_cb(row, row_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)coin_index);
-        lv_obj_add_event_cb(row, row_event_cb, LV_EVENT_LONG_PRESSED, (void *)(uintptr_t)coin_index);
-
-        char buf_price[32];
-        char buf_1h[16];
-        char buf_24h[16];
-        char buf_7d[16];
-        char buf_hold[24];
-        char buf_value[32];
-
-        format_usd(coin->price, buf_price, sizeof(buf_price));
-        format_percent(coin->change_1h, buf_1h, sizeof(buf_1h));
-        format_percent(coin->change_24h, buf_24h, sizeof(buf_24h));
-        format_percent(coin->change_7d, buf_7d, sizeof(buf_7d));
-        format_holdings(coin->holdings, buf_hold, sizeof(buf_hold));
-        format_usd(coin->price * coin->holdings, buf_value, sizeof(buf_value));
-
-        lv_color_t value_color = s_offline ? color_stale : lv_color_hex(0xE6E6E6);
-        lv_color_t holdings_color = s_offline ? color_stale : lv_color_hex(0xC5CBD6);
-        lv_color_t pct_1h_color = s_offline ? color_neutral : percent_color(coin->change_1h);
-        lv_color_t pct_24h_color = s_offline ? color_neutral : percent_color(coin->change_24h);
-        lv_color_t pct_7d_color = s_offline ? color_neutral : percent_color(coin->change_7d);
-
-        create_cell(row, coin->symbol, 80, lv_color_hex(0xE6E6E6));
-        create_cell(row, buf_price, 120, value_color);
-        create_cell(row, buf_1h, 70, pct_1h_color);
-        create_cell(row, buf_24h, 70, pct_24h_color);
-        create_cell(row, buf_7d, 70, pct_7d_color);
-        create_sparkline_cell(row, coin);
-        create_cell(row, buf_hold, 120, holdings_color);
-        create_cell(row, buf_value, 120, value_color);
+    for (size_t i = count; i < s_row_count; i++) {
+        if (s_rows[i].row) {
+            lv_obj_add_flag(s_rows[i].row, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
 lv_obj_t *ui_home_screen_create(void)
 {
     lv_obj_t *screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x101218), 0);
+    s_screen = screen;
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_pad_top(screen, UI_NAV_HEIGHT, 0);
 
     color_pos = lv_color_hex(0x2ECC71);
@@ -1024,57 +1499,62 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x9AA1AD), 0);
     lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, -12, 0);
 
-    lv_obj_t *table_header = lv_obj_create(screen);
-    lv_obj_set_size(table_header, 800, 36);
-    lv_obj_align(table_header, LV_ALIGN_TOP_LEFT, 0, 50);
-    lv_obj_set_style_bg_color(table_header, lv_color_hex(0x141822), 0);
-    lv_obj_set_style_border_width(table_header, 0, 0);
-
-    lv_obj_t *cols = lv_label_create(table_header);
-    lv_label_set_text(cols, "Symbol   Price   1h%   24h%   7d%   Spark   Holdings   Value");
-    lv_obj_set_style_text_color(cols, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(cols, LV_ALIGN_LEFT_MID, 12, 0);
-
     lv_obj_t *sort_bar = lv_obj_create(screen);
     lv_obj_set_size(sort_bar, 800, 34);
-    lv_obj_align(sort_bar, LV_ALIGN_TOP_LEFT, 0, 86);
+    lv_obj_align(sort_bar, LV_ALIGN_TOP_LEFT, 0, 55);
     lv_obj_set_style_bg_color(sort_bar, lv_color_hex(0x11151F), 0);
     lv_obj_set_style_border_width(sort_bar, 0, 0);
-    lv_obj_set_style_pad_left(sort_bar, 8, 0);
-    lv_obj_set_style_pad_right(sort_bar, 8, 0);
+    lv_obj_set_style_pad_left(sort_bar, 10, 0);
+    lv_obj_set_style_pad_right(sort_bar, 10, 0);
     lv_obj_set_style_pad_top(sort_bar, 4, 0);
     lv_obj_set_style_pad_bottom(sort_bar, 4, 0);
     lv_obj_set_flex_flow(sort_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(sort_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(sort_bar, 6, 0);
 
-    static const char *labels[6] = {"Sym", "Price", "1h", "24h", "7d", "Value"};
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 5; i++) {
         lv_obj_t *btn = lv_btn_create(sort_bar);
-        lv_obj_set_size(btn, 70, 26);
+        lv_obj_set_size(btn, s_col_widths[i], 26);
         lv_obj_set_style_radius(btn, 6, 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1D26), 0);
         lv_obj_add_event_cb(btn, sort_button_event, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
         lv_obj_t *label = lv_label_create(btn);
-        lv_label_set_text(label, labels[i]);
+        lv_label_set_text(label, s_sort_texts[i]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
         lv_obj_center(label);
         s_sort_buttons[i] = btn;
+        s_sort_labels[i] = label;
     }
 
-    s_sort_dir_btn = lv_btn_create(sort_bar);
-    lv_obj_set_size(s_sort_dir_btn, 70, 26);
-    lv_obj_set_style_radius(s_sort_dir_btn, 6, 0);
-    lv_obj_set_style_bg_color(s_sort_dir_btn, lv_color_hex(0x1A1D26), 0);
-    lv_obj_add_event_cb(s_sort_dir_btn, sort_dir_event, LV_EVENT_CLICKED, NULL);
+    s_holdings_pill = lv_btn_create(sort_bar);
+    lv_obj_set_size(s_holdings_pill, s_col_widths[5], 26);
+    lv_obj_set_style_radius(s_holdings_pill, 6, 0);
+    lv_obj_set_style_bg_color(s_holdings_pill, lv_color_hex(0x1A1D26), 0);
+    lv_obj_clear_flag(s_holdings_pill, LV_OBJ_FLAG_CLICKABLE);
 
-    s_sort_dir_label = lv_label_create(s_sort_dir_btn);
-    lv_label_set_text(s_sort_dir_label, "Asc");
-    lv_obj_center(s_sort_dir_label);
+    lv_obj_t *hold_label = lv_label_create(s_holdings_pill);
+    lv_label_set_text(hold_label, s_holdings_text);
+    lv_obj_set_style_text_font(hold_label, &lv_font_montserrat_16, 0);
+    lv_obj_center(hold_label);
+
+    lv_obj_t *value_btn = lv_btn_create(sort_bar);
+    lv_obj_set_size(value_btn, s_col_widths[6], 26);
+    lv_obj_set_style_radius(value_btn, 6, 0);
+    lv_obj_set_style_bg_color(value_btn, lv_color_hex(0x1A1D26), 0);
+    lv_obj_add_event_cb(value_btn, sort_button_event, LV_EVENT_CLICKED, (void *)(uintptr_t)SORT_VALUE);
+
+    lv_obj_t *value_label = lv_label_create(value_btn);
+    lv_label_set_text(value_label, s_sort_texts[SORT_VALUE]);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_16, 0);
+    lv_obj_center(value_label);
+    s_sort_buttons[SORT_VALUE] = value_btn;
+    s_sort_labels[SORT_VALUE] = value_label;
 
     s_table_body = lv_obj_create(screen);
-    lv_obj_set_size(s_table_body, 800, 300);
-    lv_obj_align(s_table_body, LV_ALIGN_TOP_LEFT, 0, 120);
-    lv_obj_set_style_bg_color(s_table_body, lv_color_hex(0x101218), 0);
+    lv_obj_set_size(s_table_body, 800, 336);
+    lv_obj_align(s_table_body, LV_ALIGN_TOP_LEFT, 0, 89);
+    lv_obj_set_style_bg_color(s_table_body, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_border_width(s_table_body, 0, 0);
     lv_obj_set_style_pad_left(s_table_body, 10, 0);
     lv_obj_set_style_pad_right(s_table_body, 10, 0);

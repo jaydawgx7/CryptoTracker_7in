@@ -4,6 +4,9 @@ HARDWARE FACTS (must follow):
 - Device: Elecrow CrowPanel Advance 7" 800x480 RGB panel, capacitive touch, ESP32-S3-WROOM-1-N16R8 (16MB flash, 8MB PSRAM).
 - Board revision: V1.3 (printed on PCB).
 - V1.3 has a control MCU on I2C address 0x30 controlling: backlight brightness, speaker enable, buzzer.
+- V1.3 control MCU commands:
+  - Brightness: 0 = max, 244 = min, 245 = off.
+  - Buzzer: 246 = on, 247 = off.
 - I2C bus uses SDA GPIO15, SCL GPIO16 (printed on PCB) and has at least:
   - RTC at 0x51 (printed on PCB)
   - Touch at 0x5D (Elecrow wiki)
@@ -18,7 +21,7 @@ HARDWARE FACTS (must follow):
 
 ### Display
 - RGB panel: 800x480.
-- Pixel clock: 21 MHz, `LCD_CLK_SRC_PLL240M`.
+- Pixel clock: 16 MHz, `LCD_CLK_SRC_PLL240M`.
 - Timing (CrowPanel Advance 7"): HSYNC 4/40/40, VSYNC 10/30/1, `pclk_active_neg=1`.
 - Bounce buffer enabled to avoid rolling.
 - LVGL vertical compensation: `ver_res = 480 + 40`, `offset_y = -40`.

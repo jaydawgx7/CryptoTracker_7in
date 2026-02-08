@@ -28,8 +28,18 @@ static lv_obj_t *s_settings_screen = NULL;
 static lv_obj_t *s_add_coin_screen = NULL;
 static lv_obj_t *s_alerts_screen = NULL;
 static lv_obj_t *s_coin_detail_screen = NULL;
+#if CT_UI_TOUCH_DEBUG
 static lv_obj_t *s_touch_indicator = NULL;
 static lv_timer_t *s_touch_timer = NULL;
+#endif
+
+static void load_screen(lv_obj_t *screen)
+{
+    if (!screen) {
+        return;
+    }
+    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+}
 
 #if CT_UI_BORDER_DEBUG
 static void apply_screen_border(lv_obj_t *screen)
@@ -125,9 +135,7 @@ void ui_init(void)
     apply_screen_border(s_coin_detail_screen);
 #endif
 
-    if (s_home_screen) {
-        lv_scr_load(s_home_screen);
-    }
+    load_screen(s_home_screen);
 
 #if CT_UI_TOUCH_DEBUG
     touch_debug_init();
@@ -140,9 +148,8 @@ void ui_init(void)
 
 void ui_show_home(void)
 {
-    if (s_home_screen) {
-        lv_scr_load(s_home_screen);
-    }
+    load_screen(s_home_screen);
+    ui_home_refresh();
 }
 
 void ui_set_app_state(const app_state_t *state)
@@ -160,29 +167,24 @@ void ui_set_app_state(const app_state_t *state)
 
 void ui_show_add_coin(void)
 {
-    if (s_add_coin_screen) {
-        lv_scr_load(s_add_coin_screen);
-    }
+    load_screen(s_add_coin_screen);
 }
 
 void ui_show_alerts(void)
 {
-    if (s_alerts_screen) {
-        lv_scr_load(s_alerts_screen);
-    }
+    load_screen(s_alerts_screen);
+    ui_alerts_refresh();
 }
 
 void ui_show_coin_detail(size_t index)
 {
     if (s_coin_detail_screen) {
         ui_coin_detail_show_index(index);
-        lv_scr_load(s_coin_detail_screen);
+        load_screen(s_coin_detail_screen);
     }
 }
 
 void ui_show_settings(void)
 {
-    if (s_settings_screen) {
-        lv_scr_load(s_settings_screen);
-    }
+    load_screen(s_settings_screen);
 }

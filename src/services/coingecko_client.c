@@ -1,5 +1,6 @@
 #include "services/coingecko_client.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,7 @@
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -96,13 +98,23 @@ static esp_err_t http_get_json(const char *url, char **out)
 
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    int64_t content_len = esp_http_client_get_content_length(client);
 
     if (err != ESP_OK || status != 200) {
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP GET failed: %s url=%s", esp_err_to_name(err), url);
+        } else {
+            ESP_LOGW(TAG, "HTTP GET status=%d url=%s len=%lld", status, url, (long long)content_len);
+        }
         free(buffer.buf);
+        esp_http_client_cleanup(client);
+        if (err == ESP_OK && status == 429) {
+            return ESP_ERR_TIMEOUT;
+        }
         return err != ESP_OK ? err : ESP_FAIL;
     }
 
+    esp_http_client_cleanup(client);
     *out = buffer.buf;
     return ESP_OK;
 }
@@ -133,6 +145,96 @@ static esp_err_t parse_coin_list(const char *json, coin_list_t *list)
     size_t count = 0;
     cJSON *item = NULL;
     cJSON_ArrayForEach(item, root) {
+        if (count >= total) {
+            break;
+        }
+
+        cJSON *id = cJSON_GetObjectItem(item, "id");
+        cJSON *symbol = cJSON_GetObjectItem(item, "symbol");
+        cJSON *name = cJSON_GetObjectItem(item, "name");
+
+        if (!cJSON_IsString(id) || !cJSON_IsString(symbol) || !cJSON_IsString(name)) {
+            continue;
+        }
+
+        strncpy(items[count].id, id->valuestring, sizeof(items[count].id) - 1);
+        strncpy(items[count].symbol, symbol->valuestring, sizeof(items[count].symbol) - 1);
+        strncpy(items[count].name, name->valuestring, sizeof(items[count].name) - 1);
+        count++;
+    }
+
+    cJSON_Delete(root);
+    list->items = items;
+    list->count = count;
+    return ESP_OK;
+}
+
+static char *url_encode(const char *src)
+{
+    if (!src) {
+        return NULL;
+    }
+
+    size_t len = strlen(src);
+    size_t cap = len * 3 + 1;
+    char *out = malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[pos++] = (char)c;
+        } else if (c == ' ') {
+            out[pos++] = '%';
+            out[pos++] = '2';
+            out[pos++] = '0';
+        } else {
+            static const char hex[] = "0123456789ABCDEF";
+            out[pos++] = '%';
+            out[pos++] = hex[(c >> 4) & 0xF];
+            out[pos++] = hex[c & 0xF];
+        }
+    }
+
+    out[pos] = '\0';
+    return out;
+}
+
+static esp_err_t parse_search_results(const char *json, coin_list_t *list, size_t limit)
+{
+    if (!json || !list || limit == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    cJSON *coins = cJSON_GetObjectItem(root, "coins");
+    if (!coins || !cJSON_IsArray(coins)) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    size_t total = cJSON_GetArraySize(coins);
+    if (total > limit) {
+        total = limit;
+    }
+
+    coin_meta_t *items = calloc(total, sizeof(coin_meta_t));
+    if (!items) {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t count = 0;
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, coins) {
         if (count >= total) {
             break;
         }
@@ -296,6 +398,26 @@ static char *build_ids_csv(const app_state_t *state)
     return csv;
 }
 
+static bool json_to_double(const cJSON *item, double *out)
+{
+    if (!item || !out) {
+        return false;
+    }
+    if (cJSON_IsNumber(item)) {
+        *out = item->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+        char *end = NULL;
+        double value = strtod(item->valuestring, &end);
+        if (end && end != item->valuestring) {
+            *out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void update_coin_from_json(coin_t *coin, const cJSON *item)
 {
     cJSON *price = cJSON_GetObjectItem(item, "current_price");
@@ -307,29 +429,30 @@ static void update_coin_from_json(coin_t *coin, const cJSON *item)
     cJSON *market_cap = cJSON_GetObjectItem(item, "market_cap");
     cJSON *volume = cJSON_GetObjectItem(item, "total_volume");
 
-    if (cJSON_IsNumber(price)) {
-        coin->price = price->valuedouble;
+    double value = 0.0;
+    if (json_to_double(price, &value)) {
+        coin->price = value;
     }
-    if (cJSON_IsNumber(pct1h)) {
-        coin->change_1h = pct1h->valuedouble;
+    if (json_to_double(pct1h, &value)) {
+        coin->change_1h = value;
     }
-    if (cJSON_IsNumber(pct24h)) {
-        coin->change_24h = pct24h->valuedouble;
+    if (json_to_double(pct24h, &value)) {
+        coin->change_24h = value;
     }
-    if (cJSON_IsNumber(pct7d)) {
-        coin->change_7d = pct7d->valuedouble;
+    if (json_to_double(pct7d, &value)) {
+        coin->change_7d = value;
     }
-    if (cJSON_IsNumber(high24)) {
-        coin->high_24h = high24->valuedouble;
+    if (json_to_double(high24, &value)) {
+        coin->high_24h = value;
     }
-    if (cJSON_IsNumber(low24)) {
-        coin->low_24h = low24->valuedouble;
+    if (json_to_double(low24, &value)) {
+        coin->low_24h = value;
     }
-    if (cJSON_IsNumber(market_cap)) {
-        coin->market_cap = market_cap->valuedouble;
+    if (json_to_double(market_cap, &value)) {
+        coin->market_cap = value;
     }
-    if (cJSON_IsNumber(volume)) {
-        coin->volume_24h = volume->valuedouble;
+    if (json_to_double(volume, &value)) {
+        coin->volume_24h = value;
     }
 }
 
@@ -364,6 +487,32 @@ esp_err_t coingecko_client_fetch_coin_list(coin_list_t *list)
     return err;
 }
 
+esp_err_t coingecko_client_search_coins(const char *query, coin_list_t *list, size_t limit)
+{
+    if (!query || !list || limit == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char *encoded = url_encode(query);
+    if (!encoded) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/api/v3/search?query=%s", COINGECKO_BASE_URL, encoded);
+    free(encoded);
+
+    char *json = NULL;
+    esp_err_t err = http_get_json(url, &json);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = parse_search_results(json, list, limit);
+    free(json);
+    return err;
+}
+
 esp_err_t coingecko_client_fetch_markets(app_state_t *state)
 {
     if (!state || state->watchlist_count == 0) {
@@ -377,7 +526,7 @@ esp_err_t coingecko_client_fetch_markets(app_state_t *state)
 
     char url[512];
     snprintf(url, sizeof(url),
-             "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d&sparkline=false",
+             "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d&sparkline=false&precision=full",
              COINGECKO_BASE_URL,
              COINGECKO_MARKETS_ENDPOINT,
              ids);
