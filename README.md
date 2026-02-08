@@ -1,5 +1,7 @@
 # CryptoTracker
 
+[![Build](https://img.shields.io/badge/build-manual-lightgrey)](https://github.com/jaydawgx7/CryptoTracker_7in/actions)
+
 ESP-IDF + LVGL crypto portfolio tracker for the Elecrow CrowPanel Advance 7.0" ESP32-S3 (PCB V1.3).
 
 ## Build and Flash (PlatformIO)
