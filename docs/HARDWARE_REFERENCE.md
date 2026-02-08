@@ -1,0 +1,195 @@
+You are writing an ESP-IDF + LVGL application for the Elecrow CrowPanel Advance 7.0" ESP32-S3 display, PCB revision V1.3 (SKU DIS02170A). The UI is a modern dark-mode crypto portfolio tracker with editable holdings, watchlist management, charts, sorting, alerts, WiFi manager, brightness, and persistent config via NVS.
+
+HARDWARE FACTS (must follow):
+- Device: Elecrow CrowPanel Advance 7" 800x480 RGB panel, capacitive touch, ESP32-S3-WROOM-1-N16R8 (16MB flash, 8MB PSRAM).
+- Board revision: V1.3 (printed on PCB).
+- V1.3 has a control MCU on I2C address 0x30 controlling: backlight brightness, speaker enable, buzzer.
+- I2C bus uses SDA GPIO15, SCL GPIO16 (printed on PCB) and has at least:
+  - RTC at 0x51 (printed on PCB)
+  - Touch at 0x5D (Elecrow wiki)
+  - Control MCU at 0x30 (Elecrow V1.3 notes)
+- Touch controller is GT911-class at I2C 0x5D. Touch INT is GPIO1 per Elecrow wiring for this model. If reset is required, implement optional reset handling via a configurable GPIO.
+- Use ESP-IDF RGB panel driver (esp_lcd_rgb_panel) for display. Use LVGL v8.x.
+- PSRAM is available and should be used for LVGL buffers and asset storage when possible.
+- Brightness control must work via the control MCU at 0x30. Provide a brightness slider in settings that changes backlight immediately and persists.
+- Add a simple I2C scan debug view in settings to confirm addresses 0x30, 0x51, 0x5D.
+
+## Display + Touch Notes (Working Setup)
+
+### Display
+- RGB panel: 800x480.
+- Pixel clock: 21 MHz, `LCD_CLK_SRC_PLL240M`.
+- Timing (CrowPanel Advance 7"): HSYNC 4/40/40, VSYNC 10/30/1, `pclk_active_neg=1`.
+- Bounce buffer enabled to avoid rolling.
+- LVGL vertical compensation: `ver_res = 480 + 40`, `offset_y = -40`.
+
+### Touch
+- Driver: `esp_lcd_touch` + `esp_lcd_touch_gt911` (vendored in `components/`).
+- I2C address: 0x5D, INT: GPIO1.
+- INT wake pulse required before init on this panel.
+- GT911 register address swap should be disabled when using `esp_lcd_panel_io_i2c`.
+
+### Touch Calibration Strategy
+- Use physical vs. LVGL target height split:
+  - Physical: 480 (`CT_TOUCH_PHYS_V_RES`)
+  - LVGL target: 520 (`CT_TOUCH_TARGET_V_RES`)
+  - Offset: +40 (`CT_TOUCH_OFFSET_Y`)
+- Calibration ranges are applied before offset:
+  - `CT_TOUCH_CAL_X_MIN/MAX`, `CT_TOUCH_CAL_Y_MIN/MAX`.
+- If touch drifts lower at the bottom, increase `CT_TOUCH_CAL_Y_MAX` in small steps.
+
+SOFTWARE STACK:
+- ESP-IDF project in PlatformIO.
+- LVGL 8.3.x (pin a known stable version).
+- Use cJSON for JSON parsing.
+- Use esp_http_client for HTTPS. Use the ESP-IDF certificate bundle for TLS verification (preferred) or structure code to allow a dev mode that skips verification behind a build flag.
+- Use NVS for persistence: WiFi networks, watchlist, holdings, alerts, theme, refresh settings, sorting preferences, and cached CoinGecko coin list.
+
+APP OVERVIEW:
+Name: “CryptoTracker” (or a better modern title if you want). Runs on 800x480 landscape.
+
+Currency: USD only.
+Display % changes for 1h, 24h, 7d like CoinMarketCap.
+
+UI REQUIREMENTS:
+Global:
+- Default theme: dark mode. Add light-mode toggle in settings. Theme change updates styles globally.
+- Top header bar:
+  - Left: title
+  - Right: WiFi icon + RSSI, "Updated Xs ago", total portfolio value in USD.
+- Home uses a modern table view with columns:
+  Symbol | Price | 1h% | 24h% | 7d% | Holdings | Value
+- Rows are tappable. Tap opens Coin Detail.
+- Long press on row opens a modal popup:
+  - Edit holdings quantity (numeric keyboard)
+  - Alerts: low threshold, high threshold (both optional)
+  - Remove from watchlist
+  - Pin/unpin to top
+- Add Coin button opens Add Coin screen.
+
+DYNAMIC PRICE FORMATTING:
+Implement a USD price formatter that:
+- Uses 2 decimals for most coins when price >= 1.00 (example: $1.46).
+- Uses up to 6 decimals for prices between 0.01 and 1.00, trimming trailing zeros (example: $0.5342).
+- For very small prices (< 0.01), show enough decimals to include 2 significant digits after the first non-zero, up to a max of 10 decimals:
+  Example: 0.0000065 -> "$0.0000065"
+- Always include leading "$" and do not use scientific notation.
+
+Holdings input precision:
+- Allow up to 8 decimals in holdings quantity entry.
+- Store holdings as double with careful formatting.
+
+Home screen features:
+- Scrollable watchlist (unlimited).
+- Sorting controls: sort by Symbol, Price, 1h%, 24h%, 7d%, Value. Asc/desc toggle.
+- Optional sparkline column per row if feasible. If too heavy for v1, add sparkline only in Coin Detail and leave placeholder on Home.
+- Color rules:
+  - Percent changes: green positive, red negative, grey near zero.
+  - Small arrow icon up/down next to percent.
+- Offline state:
+  - Cached last values shown in grey
+  - "Offline" indicator and last successful update time
+  - Auto retry and manual reconnect action
+
+Coin Detail screen:
+- Shows symbol/name, current price, holdings, value, percent chips.
+- Chart: line chart with duration buttons:
+  1H | 24H | 7D | 30D | 1Y
+- Use buttons only, no pinch zoom.
+- Optionally drag scrub: show tooltip at point if not too complex.
+- Stats section: 24h high/low if available, and optional volume/market cap if easy.
+
+Add Coin screen:
+- Search by symbol input field.
+- Results list filters as you type.
+- Selecting result shows preview and Add button.
+- Must map symbol to CoinGecko coin id.
+  - Fetch and cache CoinGecko coin list (id, symbol, name) once.
+  - Persist in NVS with timestamp, refresh every 7 days.
+  - Build a lightweight search index (case-insensitive).
+- When added, initialize holdings=0, alerts disabled.
+
+Settings screen:
+- WiFi manager fully in LVGL:
+  - Scan SSIDs and show list with RSSI.
+  - Tap SSID -> password entry.
+  - Save multiple networks (max 5).
+  - On boot, attempt to connect to saved networks (try last_successful first, then strongest RSSI).
+  - UI to forget networks and reorder priority.
+- Brightness slider 0-100 controls backlight via I2C 0x30 immediately and persists.
+- Theme toggle dark/light.
+- Refresh settings:
+  - User preference slider 5s to 60s.
+  - Also implement adaptive rate limiting based on watchlist size and API failures.
+- Buzzer:
+  - Enable toggle
+  - "Test buzzer" button (uses control MCU 0x30)
+  - Optional volume if supported, otherwise on/off.
+- I2C scan page and debug info page.
+
+DATA + API:
+Use CoinGecko free endpoints with batching:
+- Primary refresh:
+  /api/v3/coins/markets?vs_currency=usd&ids=<comma list>&price_change_percentage=1h,24h,7d&sparkline=true
+This provides current price and % changes. Use "sparkline_in_7d" for optional sparkline.
+- Coin detail chart endpoint (only when opening Coin Detail or switching duration, not every refresh):
+  /api/v3/coins/<id>/market_chart?vs_currency=usd&days=<days>
+Where days:
+  - 1H and 24H can be derived from days=1 data by filtering last hour or last 24h
+  - 7D: days=7
+  - 30D: days=30
+  - 1Y: days=365
+Cache chart data per coin for 60s to avoid repeated requests.
+
+REFRESH STRATEGY:
+- Use a timer task:
+  - Start with 10s default.
+  - Adaptive: 10s for <=10 coins, 15s for 11-30, 30s for >30.
+  - Respect user preference but never below 5s.
+- Refresh uses an async task. UI never blocks.
+- Implement exponential backoff on errors, and show error state.
+- Marshal updates to LVGL thread safely.
+
+ALERTS:
+- Alerts per coin: low_price, high_price.
+- On refresh, compare and trigger if thresholds crossed.
+- On trigger:
+  - LVGL toast/modal notification
+  - Optional buzzer beep if enabled
+  - Add entry to alert log list
+- Provide Alerts page listing active alerts and recent triggers.
+
+PERSISTENCE MODEL (NVS):
+- saved_wifi_networks: list {ssid, password, last_successful_epoch, priority}
+- watchlist: list {coin_id, symbol, pinned, holdings, alert_low, alert_high}
+- ui_prefs: {theme, sort_field, sort_dir, refresh_pref_seconds, brightness, buzzer_enabled}
+- cache: coingecko_coin_list timestamp + data (store compressed or chunked if needed)
+
+PROJECT STRUCTURE:
+main/
+  app_main.c
+  ui/ (screen builders, styles, navigation)
+  services/
+    wifi_manager.c
+    nvs_store.c
+    coingecko_client.c
+    scheduler.c
+    alert_manager.c
+    control_mcu.c
+    touch_driver.c
+    display_driver.c
+  models/ (structs)
+
+CRITICAL IMPLEMENTATION NOTES:
+- LVGL runs in a dedicated task with proper locking.
+- All HTTP and JSON parsing is off the LVGL task.
+- Use PSRAM for LVGL draw buffers.
+- Initialize control MCU early and set default brightness so the display is visible.
+
+DELIVERABLES:
+1) Complete ESP-IDF PlatformIO project code that builds and runs.
+2) README with build/flash instructions and first-run flow.
+3) First run flow: boot -> WiFi setup -> add coin -> see updates.
+4) Default watchlist includes BTC and XRP.
+
+Make it look modern and clean: spacing, rounded cards, subtle separators, readable typography. Avoid heavy animations. Prioritize reliability.

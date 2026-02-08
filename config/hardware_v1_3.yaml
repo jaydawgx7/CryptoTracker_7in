@@ -1,0 +1,126 @@
+board:
+  vendor: elecrow
+  product: crowpanel_advance_7
+  sku: "DIS02170A"
+  revision: "v1.3"
+  mcu_module: "ESP32-S3-WROOM-1-N16R8"
+  flash_mb: 16
+  psram_mb: 8
+  notes:
+    - "This YAML reflects Elecrow CrowPanel Advance 7.0 inch, PCB revision V1.3 (printed on board)."
+    - "GPIO15/16 are shared I2C lines used by multiple devices."
+
+display:
+  type: rgb_parallel
+  resolution:
+    width: 800
+    height: 480
+  panel:
+    technology: ips
+    color_depth_bits: 16
+    driver_ic: "ST7277"
+  rgb_panel:
+    timings:
+      note: "Fill timing values from Elecrow schematic/wiki images. Use esp_lcd_rgb_panel in ESP-IDF."
+      hsync_pulse_width: null
+      hsync_back_porch: null
+      hsync_front_porch: null
+      vsync_pulse_width: null
+      vsync_back_porch: null
+      vsync_front_porch: null
+      pclk_hz: null
+      hsync_polarity: null
+      vsync_polarity: null
+      de_polarity: null
+      pclk_active_neg: null
+
+touch:
+  type: capacitive
+  controller: "GT911-class"
+  i2c_address: 0x5D
+  i2c_bus: "i2c0"
+  interrupt_gpio: 1
+  reset_gpio: null
+  notes:
+    - "Touch controller address 0x5D per Elecrow wiki."
+    - "INT shown as IO1 on Elecrow wiring image for this model."
+    - "Reset pin exists on some diagrams; keep reset_gpio configurable."
+
+i2c_buses:
+  i2c0:
+    sda: 15
+    scl: 16
+    frequency_hz: 400000
+    devices:
+      - name: rtc
+        address: 0x51
+        notes:
+          - "Printed on PCB: I2C address 0x51, IO15=RTC_SDA, IO16=RTC_SCL."
+      - name: touch
+        address: 0x5D
+        notes:
+          - "Touch controller on same bus."
+      - name: control_mcu
+        address: 0x30
+        notes:
+          - "V1.3 control MCU: backlight control, speaker enable, buzzer control."
+
+control_mcu:
+  bus: "i2c0"
+  address: 0x30
+  functions:
+    backlight:
+      supported: true
+      range_percent: [0, 100]
+    buzzer:
+      supported: true
+      modes:
+        - "on_off"
+    speaker_enable:
+      supported: true
+  notes:
+    - "Elecrow V1.3 notes: a separate MCU controls backlight, speaker on/off, buzzer via I2C 0x30."
+
+audio:
+  supported: true
+  interfaces:
+    i2s:
+      pins:
+        bclk: 13
+        lrclk: 11
+        dout: 12
+      notes:
+        - "I2S pins shown in Elecrow example repo. Verify against your board if audio is used in v1."
+  pcb_silkscreen_hints:
+    mic_lines:
+      - "IO5 SDIN"
+      - "IO6 BCLK"
+      - "IO4 LRCLK"
+
+storage:
+  sd_card:
+    supported: true
+    bus: spi
+    pins:
+      sck: 5
+      miso: 4
+      mosi: 6
+      cs: 7
+    cs_note: "Elecrow example repo notes SD CS may not be directly connected to IO; verify against schematic before relying on it."
+
+wifi:
+  supported: true
+  band: "2.4GHz"
+  bluetooth:
+    supported: true
+    version: "BT5/BLE"
+
+function_select:
+  supported: true
+  notes:
+    - "Elecrow wiki lists function select mapping: 00 MIC&SPK, 01 wireless module, 10 TF card."
+    - "If your board has this switch populated, confirm its position when debugging peripherals."
+
+power:
+  input: "5V"
+  recommended_current_a: 2

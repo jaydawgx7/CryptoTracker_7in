@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"name": "CryptoTracker",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"/^pio run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			}
+		}
+	}
+}
