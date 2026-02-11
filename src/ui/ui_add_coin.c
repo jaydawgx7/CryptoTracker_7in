@@ -16,14 +16,15 @@
 #include "services/wifi_manager.h"
 
 #include "ui/ui_nav.h"
+#include "ui/ui_theme.h"
 #define MAX_RESULTS 20
 
 #ifndef CT_KEYBOARD_ENABLE
 #define CT_KEYBOARD_ENABLE 0
 #endif
 
-#define ADD_TEXT_COLOR 0x00FE8F
-#define ADD_TEXT_MUTED 0x6BCFAD
+#define ADD_TEXT_COLOR add_accent_color()
+#define ADD_TEXT_MUTED add_accent_color()
 #define ADD_BTN_BG 0x222222
 
 static app_state_t *s_state = NULL;
@@ -41,10 +42,17 @@ static lv_obj_t *s_toast = NULL;
 static lv_timer_t *s_toast_timer = NULL;
 static bool s_fetch_inflight = false;
 static char s_last_query[48] = {0};
+static char s_last_fetch_query[48] = {0};
 static bool s_has_query = false;
 static int s_fetch_token = 0;
 
 static void show_status(const char *text);
+
+static uint32_t add_accent_color(void)
+{
+    const ui_theme_colors_t *theme = ui_theme_get();
+    return theme ? theme->accent : 0x00FE8F;
+}
 
 typedef struct {
     coin_list_t list;
@@ -274,7 +282,7 @@ static void search_button_event(lv_event_t *e)
         return;
     }
 
-    if (!s_list_ready) {
+    if (!s_list_ready || strcmp(s_last_query, s_last_fetch_query) != 0) {
         ui_add_coin_refresh();
         return;
     }
@@ -366,6 +374,8 @@ static void coin_list_ready_cb(void *arg)
 
     s_coin_list = ctx->list;
     s_list_ready = true;
+    strncpy(s_last_fetch_query, ctx->query, sizeof(s_last_fetch_query) - 1);
+    s_last_fetch_query[sizeof(s_last_fetch_query) - 1] = '\0';
     show_status("Type to search");
     free(ctx);
 

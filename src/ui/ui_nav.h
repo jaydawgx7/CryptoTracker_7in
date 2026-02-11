@@ -12,4 +12,6 @@ typedef enum {
 } ui_nav_page_t;
 
 void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page);
+void ui_nav_attach_with_home_label(lv_obj_t *screen, ui_nav_page_t active_page, const char *home_label);
+void ui_nav_attach_back_only(lv_obj_t *screen);
 void ui_nav_set_alert_badge(bool visible);

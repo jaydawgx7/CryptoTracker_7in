@@ -64,15 +64,19 @@ void ui_nav_set_alert_badge(bool visible)
 	s_alert_badge_visible = visible;
 }
 
-void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
+static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, const char *home_label, bool back_only)
 {
 	const ui_theme_colors_t *theme = ui_theme_get();
 	uint32_t nav_bg = theme ? theme->bg : 0x0F1117;
 	uint32_t indicator_color = theme ? theme->accent : 0x00FE8F;
+	uint32_t active_bg = theme ? theme->nav_active_bg : 0x222222;
+	uint32_t inactive_bg = theme ? theme->nav_inactive_bg : 0x212121;
+	uint32_t active_text = theme ? theme->nav_text_active : 0x00FE8F;
+	const char *home_text = (home_label && home_label[0] != '\0') ? home_label : "Home";
 
 	lv_obj_t *nav = lv_obj_create(screen);
 	lv_obj_set_size(nav, 800, 56);
-	lv_obj_align(nav, LV_ALIGN_TOP_MID, 0, 0);
+	lv_obj_align(nav, LV_ALIGN_TOP_MID, 0, -12);
 	lv_obj_set_style_bg_color(nav, lv_color_hex(nav_bg), 0);
 	lv_obj_set_style_border_width(nav, 0, 0);
 	lv_obj_set_style_pad_left(nav, 10, 0);
@@ -80,15 +84,30 @@ void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 	lv_obj_set_style_pad_top(nav, 8, 0);
 	lv_obj_set_style_pad_bottom(nav, 8, 0);
 	lv_obj_set_flex_flow(nav, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(nav, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	if (back_only) {
+		lv_obj_set_flex_align(nav, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	} else {
+		lv_obj_set_flex_align(nav, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	}
 
 	lv_obj_t *buttons[4] = {0};
-	buttons[0] = create_nav_button(nav, "Home", UI_NAV_HOME, active_page == UI_NAV_HOME);
-	buttons[1] = create_nav_button(nav, "Add", UI_NAV_ADD, active_page == UI_NAV_ADD);
-	buttons[2] = create_nav_button(nav, "Alerts", UI_NAV_ALERTS, active_page == UI_NAV_ALERTS);
-	buttons[3] = create_nav_button(nav, "Settings", UI_NAV_SETTINGS, active_page == UI_NAV_SETTINGS);
+	if (back_only) {
+		buttons[0] = create_nav_button(nav, home_text, UI_NAV_HOME, false);
+		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(inactive_bg), 0);
+		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(active_bg), LV_STATE_PRESSED);
+		lv_obj_t *label = lv_obj_get_child(buttons[0], 0);
+		if (label) {
+			lv_obj_set_style_text_color(label, lv_color_hex(active_text), 0);
+			lv_obj_set_style_text_color(label, lv_color_hex(active_text), LV_STATE_PRESSED);
+		}
+	} else {
+		buttons[0] = create_nav_button(nav, home_text, UI_NAV_HOME, active_page == UI_NAV_HOME);
+		buttons[1] = create_nav_button(nav, "Add", UI_NAV_ADD, active_page == UI_NAV_ADD);
+		buttons[2] = create_nav_button(nav, "Alerts", UI_NAV_ALERTS, active_page == UI_NAV_ALERTS);
+		buttons[3] = create_nav_button(nav, "Settings", UI_NAV_SETTINGS, active_page == UI_NAV_SETTINGS);
+	}
 
-	if (active_page < 4 && buttons[active_page]) {
+	if (!back_only && active_page < 4 && buttons[active_page]) {
 		lv_obj_t *label = lv_obj_get_child(buttons[active_page], 0);
 		if (label) {
 			lv_obj_set_style_text_opa(label, LV_OPA_0, 0);
@@ -111,7 +130,7 @@ void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 		s_last_indicator_x = target_x;
 	}
 
-	if (s_alert_badge_visible && buttons[UI_NAV_ALERTS]) {
+	if (s_alert_badge_visible && !back_only && buttons[UI_NAV_ALERTS]) {
 		lv_obj_t *badge = lv_obj_create(buttons[UI_NAV_ALERTS]);
 		lv_obj_set_size(badge, 10, 10);
 		lv_obj_set_style_bg_color(badge, lv_color_hex(0xE74C3C), 0);
@@ -121,4 +140,19 @@ void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 
 		anim_set_transform_zoom(badge, 256);
 	}
+}
+
+void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
+{
+	ui_nav_attach_internal(screen, active_page, "Home", false);
+}
+
+void ui_nav_attach_with_home_label(lv_obj_t *screen, ui_nav_page_t active_page, const char *home_label)
+{
+	ui_nav_attach_internal(screen, active_page, home_label, false);
+}
+
+void ui_nav_attach_back_only(lv_obj_t *screen)
+{
+	ui_nav_attach_internal(screen, UI_NAV_HOME, "Back", true);
 }

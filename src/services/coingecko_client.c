@@ -418,20 +418,24 @@ static bool json_to_double(const cJSON *item, double *out)
     return false;
 }
 
-static void update_coin_from_json(coin_t *coin, const cJSON *item)
+static void update_coin_from_json(coin_t *coin, const cJSON *item, bool update_price)
 {
     cJSON *price = cJSON_GetObjectItem(item, "current_price");
     cJSON *pct1h = cJSON_GetObjectItem(item, "price_change_percentage_1h_in_currency");
     cJSON *pct24h = cJSON_GetObjectItem(item, "price_change_percentage_24h_in_currency");
     cJSON *pct7d = cJSON_GetObjectItem(item, "price_change_percentage_7d_in_currency");
+    cJSON *pct30d = cJSON_GetObjectItem(item, "price_change_percentage_30d_in_currency");
+    cJSON *pct1y = cJSON_GetObjectItem(item, "price_change_percentage_1y_in_currency");
     cJSON *high24 = cJSON_GetObjectItem(item, "high_24h");
     cJSON *low24 = cJSON_GetObjectItem(item, "low_24h");
     cJSON *market_cap = cJSON_GetObjectItem(item, "market_cap");
     cJSON *volume = cJSON_GetObjectItem(item, "total_volume");
 
     double value = 0.0;
-    if (json_to_double(price, &value)) {
-        coin->price = value;
+    if (update_price) {
+        if (json_to_double(price, &value)) {
+            coin->price = value;
+        }
     }
     if (json_to_double(pct1h, &value)) {
         coin->change_1h = value;
@@ -442,17 +446,25 @@ static void update_coin_from_json(coin_t *coin, const cJSON *item)
     if (json_to_double(pct7d, &value)) {
         coin->change_7d = value;
     }
-    if (json_to_double(high24, &value)) {
-        coin->high_24h = value;
+    if (json_to_double(pct30d, &value)) {
+        coin->change_30d = value;
     }
-    if (json_to_double(low24, &value)) {
-        coin->low_24h = value;
+    if (json_to_double(pct1y, &value)) {
+        coin->change_1y = value;
     }
-    if (json_to_double(market_cap, &value)) {
-        coin->market_cap = value;
-    }
-    if (json_to_double(volume, &value)) {
-        coin->volume_24h = value;
+    if (update_price) {
+        if (json_to_double(high24, &value)) {
+            coin->high_24h = value;
+        }
+        if (json_to_double(low24, &value)) {
+            coin->low_24h = value;
+        }
+        if (json_to_double(market_cap, &value)) {
+            coin->market_cap = value;
+        }
+        if (json_to_double(volume, &value)) {
+            coin->volume_24h = value;
+        }
     }
 }
 
@@ -513,7 +525,7 @@ esp_err_t coingecko_client_search_coins(const char *query, coin_list_t *list, si
     return err;
 }
 
-esp_err_t coingecko_client_fetch_markets(app_state_t *state)
+esp_err_t coingecko_client_fetch_markets_mode(app_state_t *state, bool update_price)
 {
     if (!state || state->watchlist_count == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -526,7 +538,7 @@ esp_err_t coingecko_client_fetch_markets(app_state_t *state)
 
     char url[512];
     snprintf(url, sizeof(url),
-             "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d&sparkline=false&precision=full",
+             "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d,30d,1y&sparkline=false&precision=full",
              COINGECKO_BASE_URL,
              COINGECKO_MARKETS_ENDPOINT,
              ids);
@@ -558,12 +570,17 @@ esp_err_t coingecko_client_fetch_markets(app_state_t *state)
             continue;
         }
 
-        update_coin_from_json(coin, item);
+        update_coin_from_json(coin, item, update_price);
     }
 
     cJSON_Delete(root);
     free(json);
     return ESP_OK;
+}
+
+esp_err_t coingecko_client_fetch_markets(app_state_t *state)
+{
+    return coingecko_client_fetch_markets_mode(state, true);
 }
 
 esp_err_t coingecko_client_get_chart(const char *coin_id, int days, const chart_point_t **points, size_t *count)

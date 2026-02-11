@@ -28,6 +28,8 @@ static lv_obj_t *s_settings_screen = NULL;
 static lv_obj_t *s_add_coin_screen = NULL;
 static lv_obj_t *s_alerts_screen = NULL;
 static lv_obj_t *s_coin_detail_screen = NULL;
+static const app_state_t *s_app_state = NULL;
+static bool s_theme_rebuild_pending = false;
 #if CT_UI_TOUCH_DEBUG
 static lv_obj_t *s_touch_indicator = NULL;
 static lv_timer_t *s_touch_timer = NULL;
@@ -39,6 +41,92 @@ static void load_screen(lv_obj_t *screen)
         return;
     }
     lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+}
+
+static void apply_state_to_screens(const app_state_t *state)
+{
+    if (!state) {
+        return;
+    }
+
+    ui_home_set_state(state);
+    ui_add_coin_set_state((app_state_t *)state);
+    ui_coin_detail_set_state((app_state_t *)state);
+    ui_settings_set_state((app_state_t *)state);
+}
+
+static void rebuild_screens(void)
+{
+    lv_obj_t *active_old = lv_scr_act();
+    lv_obj_t *old_home = s_home_screen;
+    lv_obj_t *old_settings = s_settings_screen;
+    lv_obj_t *old_add = s_add_coin_screen;
+    lv_obj_t *old_alerts = s_alerts_screen;
+    lv_obj_t *old_detail = s_coin_detail_screen;
+
+    bool show_home = (active_old == old_home);
+    bool show_settings = (active_old == old_settings);
+    bool show_add = (active_old == old_add);
+    bool show_alerts = (active_old == old_alerts);
+    bool show_detail = (active_old == old_detail);
+
+    s_home_screen = ui_home_screen_create();
+#if !CT_UI_MINIMAL
+    s_settings_screen = ui_settings_screen_create();
+    s_add_coin_screen = ui_add_coin_screen_create();
+    s_alerts_screen = ui_alerts_screen_create();
+    s_coin_detail_screen = ui_coin_detail_screen_create();
+#endif
+
+#if CT_UI_BORDER_DEBUG
+    apply_screen_border(s_home_screen);
+    apply_screen_border(s_settings_screen);
+    apply_screen_border(s_add_coin_screen);
+    apply_screen_border(s_alerts_screen);
+    apply_screen_border(s_coin_detail_screen);
+#endif
+
+    apply_state_to_screens(s_app_state);
+
+    if (show_settings && s_settings_screen) {
+        load_screen(s_settings_screen);
+    } else if (show_add && s_add_coin_screen) {
+        load_screen(s_add_coin_screen);
+    } else if (show_alerts && s_alerts_screen) {
+        load_screen(s_alerts_screen);
+        ui_alerts_refresh();
+    } else if (show_detail && s_coin_detail_screen) {
+        load_screen(s_coin_detail_screen);
+    } else {
+        load_screen(s_home_screen);
+        ui_home_refresh();
+    }
+
+    if (old_home) {
+        lv_obj_del_async(old_home);
+    }
+    if (old_settings) {
+        lv_obj_del_async(old_settings);
+    }
+    if (old_add) {
+        lv_obj_del_async(old_add);
+    }
+    if (old_alerts) {
+        lv_obj_del_async(old_alerts);
+    }
+    if (old_detail) {
+        lv_obj_del_async(old_detail);
+    }
+}
+
+static void rebuild_if_pending(void)
+{
+    if (!s_theme_rebuild_pending) {
+        return;
+    }
+
+    s_theme_rebuild_pending = false;
+    rebuild_screens();
 }
 
 #if CT_UI_BORDER_DEBUG
@@ -148,6 +236,7 @@ void ui_init(void)
 
 void ui_show_home(void)
 {
+    rebuild_if_pending();
     load_screen(s_home_screen);
     ui_home_refresh();
 }
@@ -158,26 +247,57 @@ void ui_set_app_state(const app_state_t *state)
         return;
     }
 
-    ui_home_set_state(state);
-    ui_add_coin_set_state((app_state_t *)state);
-    ui_coin_detail_set_state((app_state_t *)state);
+    s_app_state = state;
+
+    ui_theme_set_accent(state->prefs.accent_hex);
+    ui_theme_set_shadow_color(state->prefs.shadow_hex);
+    ui_theme_set_dark_mode(state->prefs.dark_mode);
+    ui_theme_init(state->prefs.dark_mode);
+
+    rebuild_screens();
 
     display_driver_unlock();
 }
 
+void ui_apply_theme(bool dark_mode)
+{
+    bool locked = display_driver_lock(0);
+
+    ui_theme_set_dark_mode(dark_mode);
+    if (s_app_state) {
+        ui_theme_set_accent(s_app_state->prefs.accent_hex);
+        ui_theme_set_shadow_color(s_app_state->prefs.shadow_hex);
+    }
+    ui_theme_init(dark_mode);
+
+    if (lv_scr_act() == s_settings_screen) {
+        rebuild_screens();
+        s_theme_rebuild_pending = false;
+    } else {
+        s_theme_rebuild_pending = true;
+    }
+
+    if (locked) {
+        display_driver_unlock();
+    }
+}
+
 void ui_show_add_coin(void)
 {
+    rebuild_if_pending();
     load_screen(s_add_coin_screen);
 }
 
 void ui_show_alerts(void)
 {
+    rebuild_if_pending();
     load_screen(s_alerts_screen);
     ui_alerts_refresh();
 }
 
 void ui_show_coin_detail(size_t index)
 {
+    rebuild_if_pending();
     if (s_coin_detail_screen) {
         ui_coin_detail_show_index(index);
         load_screen(s_coin_detail_screen);
@@ -186,5 +306,6 @@ void ui_show_coin_detail(size_t index)
 
 void ui_show_settings(void)
 {
+    rebuild_if_pending();
     load_screen(s_settings_screen);
 }

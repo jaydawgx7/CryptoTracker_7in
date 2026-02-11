@@ -17,13 +17,23 @@ typedef enum {
     SORT_VALUE
 } sort_field_t;
 
+typedef enum {
+    DATA_SOURCE_COINGECKO = 0,
+    DATA_SOURCE_KRAKEN
+} data_source_t;
+
 typedef struct {
     bool dark_mode;
+    bool buttons_3d;
     sort_field_t sort_field;
     bool sort_desc;
+    bool show_values;
     uint16_t refresh_seconds;
     uint8_t brightness;
     bool buzzer_enabled;
+    uint32_t accent_hex;
+    uint32_t shadow_hex;
+    data_source_t data_source;
 } ui_prefs_t;
 
 typedef struct {
