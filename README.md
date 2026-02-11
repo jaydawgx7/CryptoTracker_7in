@@ -39,12 +39,12 @@ pio device monitor -b 115200
 
 ## Screenshots
 
-![Home](screenshots/Home.png)
-![Coin Detail](screenshots/Crypto_Detail.png)
-![Add Coin](screenshots/Add_Coin.png)
-![Settings](screenshots/Settings.png)
-![Theme Settings](screenshots/Theme_Settings.png)
-![Purple Theme](screenshots/Purple_Theme.png)
+![Home](Screenshots/Home.png)
+![Coin Detail](Screenshots/Crypto_Detail.png)
+![Add Coin](Screenshots/Add_Coin.png)
+![Settings](Screenshots/Settings.png)
+![Theme Settings](Screenshots/Theme_Settings.png)
+![Purple Theme](Screenshots/Purple_Theme.png)
 
 ## Features
 
@@ -90,11 +90,11 @@ pio run
 ```
 
 3. Create a GitHub Release and upload the `firmware.bin` asset.
-  - Tag should be `vMAJOR.MINOR.PATCH` (example: `v1.2.3`).
-  - Asset name can be anything as long as it ends with `.bin`.
+   - Tag should be `vMAJOR.MINOR.PATCH` (example: `v1.2.3`).
+   - Asset name can be anything as long as it ends with `.bin`.
 
-4. On the device, open Settings -> Firmware Update and tap “Check for update”.
-5. If an update is available, tap “Install vX.Y.Z”.
+4. On the device, open Settings -> Firmware Update and tap "Check for update".
+5. If an update is available, tap "Install vX.Y.Z".
 
 ## Data Sources
 
