@@ -22,11 +22,16 @@ static const char *TAG = "nvs_store";
 static void set_default_prefs(ui_prefs_t *prefs)
 {
     prefs->dark_mode = true;
+    prefs->buttons_3d = true;
     prefs->sort_field = SORT_SYMBOL;
     prefs->sort_desc = false;
+    prefs->show_values = true;
     prefs->refresh_seconds = 10;
     prefs->brightness = 60;
     prefs->buzzer_enabled = true;
+    prefs->accent_hex = 0x00FE8F;
+    prefs->shadow_hex = 0x2A3142;
+    prefs->data_source = DATA_SOURCE_COINGECKO;
 }
 
 static void set_default_watchlist(app_state_t *state)
@@ -175,11 +180,16 @@ static cJSON *prefs_to_json(const ui_prefs_t *prefs)
     }
 
     cJSON_AddBoolToObject(obj, "dark_mode", prefs->dark_mode);
+    cJSON_AddBoolToObject(obj, "buttons_3d", prefs->buttons_3d);
     cJSON_AddNumberToObject(obj, "sort_field", prefs->sort_field);
     cJSON_AddBoolToObject(obj, "sort_desc", prefs->sort_desc);
+    cJSON_AddBoolToObject(obj, "show_values", prefs->show_values);
     cJSON_AddNumberToObject(obj, "refresh_seconds", prefs->refresh_seconds);
     cJSON_AddNumberToObject(obj, "brightness", prefs->brightness);
     cJSON_AddBoolToObject(obj, "buzzer_enabled", prefs->buzzer_enabled);
+    cJSON_AddNumberToObject(obj, "accent_hex", prefs->accent_hex);
+    cJSON_AddNumberToObject(obj, "shadow_hex", prefs->shadow_hex);
+    cJSON_AddNumberToObject(obj, "data_source", prefs->data_source);
 
     return obj;
 }
@@ -191,20 +201,31 @@ static void json_to_prefs(ui_prefs_t *prefs, const cJSON *obj)
     }
 
     cJSON *dark_mode = cJSON_GetObjectItem(obj, "dark_mode");
+    cJSON *buttons_3d = cJSON_GetObjectItem(obj, "buttons_3d");
     cJSON *sort_field = cJSON_GetObjectItem(obj, "sort_field");
     cJSON *sort_desc = cJSON_GetObjectItem(obj, "sort_desc");
+    cJSON *show_values = cJSON_GetObjectItem(obj, "show_values");
     cJSON *refresh_seconds = cJSON_GetObjectItem(obj, "refresh_seconds");
     cJSON *brightness = cJSON_GetObjectItem(obj, "brightness");
     cJSON *buzzer_enabled = cJSON_GetObjectItem(obj, "buzzer_enabled");
+    cJSON *accent_hex = cJSON_GetObjectItem(obj, "accent_hex");
+    cJSON *shadow_hex = cJSON_GetObjectItem(obj, "shadow_hex");
+    cJSON *data_source = cJSON_GetObjectItem(obj, "data_source");
 
     if (cJSON_IsBool(dark_mode)) {
         prefs->dark_mode = cJSON_IsTrue(dark_mode);
+    }
+    if (cJSON_IsBool(buttons_3d)) {
+        prefs->buttons_3d = cJSON_IsTrue(buttons_3d);
     }
     if (cJSON_IsNumber(sort_field)) {
         prefs->sort_field = (sort_field_t)sort_field->valueint;
     }
     if (cJSON_IsBool(sort_desc)) {
         prefs->sort_desc = cJSON_IsTrue(sort_desc);
+    }
+    if (cJSON_IsBool(show_values)) {
+        prefs->show_values = cJSON_IsTrue(show_values);
     }
     if (cJSON_IsNumber(refresh_seconds)) {
         prefs->refresh_seconds = (uint16_t)refresh_seconds->valueint;
@@ -214,6 +235,15 @@ static void json_to_prefs(ui_prefs_t *prefs, const cJSON *obj)
     }
     if (cJSON_IsBool(buzzer_enabled)) {
         prefs->buzzer_enabled = cJSON_IsTrue(buzzer_enabled);
+    }
+    if (cJSON_IsNumber(accent_hex)) {
+        prefs->accent_hex = (uint32_t)accent_hex->valuedouble;
+    }
+    if (cJSON_IsNumber(shadow_hex)) {
+        prefs->shadow_hex = (uint32_t)shadow_hex->valuedouble;
+    }
+    if (cJSON_IsNumber(data_source)) {
+        prefs->data_source = (data_source_t)data_source->valueint;
     }
 }
 

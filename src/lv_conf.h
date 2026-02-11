@@ -21,9 +21,12 @@
 
 #define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_22 1
+#define LV_FONT_MONTSERRAT_12 1
 
-#define LV_USE_LOG 0
+#define LV_FONT_MONTSERRAT_24 1
+#if LV_USE_LOG
 #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#endif
 #define LV_LOG_PRINTF 0
 
 #define LV_USE_ASSERT_NULL 1
@@ -35,3 +38,4 @@
 
 #define LV_USE_CHART 1
 #define LV_USE_KEYBOARD 1
+#define LV_USE_COLORWHEEL 1

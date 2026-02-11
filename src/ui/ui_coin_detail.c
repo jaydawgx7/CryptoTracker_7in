@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "lvgl.h"
 
@@ -14,6 +15,7 @@
 #include "services/display_driver.h"
 #include "ui/ui.h"
 #include "ui/ui_nav.h"
+#include "ui/ui_theme.h"
 
 
 typedef enum {
@@ -29,6 +31,15 @@ typedef struct {
     chart_range_t range;
 } chart_task_ctx_t;
 
+#define CHIP_COUNT 5
+#define CHIP_WIDTH 100
+#define CHIP_GAP 12
+#define CHIP_AREA_WIDTH (CHIP_COUNT * CHIP_WIDTH + (CHIP_COUNT - 1) * CHIP_GAP)
+#define Y_LABEL_COUNT 6
+#define X_LABEL_COUNT 12
+#define Y_AXIS_WIDTH 56
+#define CHART_POINT_SIZE 4
+
 static app_state_t *s_state = NULL;
 static size_t s_coin_index = 0;
 static chart_range_t s_range = RANGE_24H;
@@ -36,16 +47,19 @@ static bool s_loading = false;
 
 static lv_obj_t *s_screen = NULL;
 static lv_obj_t *s_title = NULL;
-static lv_obj_t *s_price = NULL;
 static lv_obj_t *s_chip_container = NULL;
-static lv_obj_t *s_chip_boxes[3] = {0};
-static lv_obj_t *s_chip_labels[3] = {0};
+static lv_obj_t *s_chip_boxes[CHIP_COUNT] = {0};
+static lv_obj_t *s_chip_labels[CHIP_COUNT] = {0};
 static lv_obj_t *s_holdings = NULL;
-static lv_obj_t *s_value = NULL;
 static lv_obj_t *s_chart = NULL;
 static lv_chart_series_t *s_series = NULL;
 static lv_obj_t *s_status = NULL;
-static lv_obj_t *s_range_buttons[5] = {0};
+static lv_obj_t *s_range_buttons[4] = {0};
+static const chart_range_t s_range_order[4] = {RANGE_1H, RANGE_24H, RANGE_7D, RANGE_1Y};
+static lv_obj_t *s_y_axis = NULL;
+static lv_obj_t *s_y_labels[Y_LABEL_COUNT] = {0};
+static lv_obj_t *s_x_axis = NULL;
+static lv_obj_t *s_x_labels[X_LABEL_COUNT] = {0};
 static lv_obj_t *s_tooltip = NULL;
 static lv_obj_t *s_tooltip_label = NULL;
 static lv_obj_t *s_guideline = NULL;
@@ -62,6 +76,8 @@ static lv_color_t percent_color(double change)
     }
     return lv_color_hex(0x9AA1AD);
 }
+
+static void format_usd_price(double price, char *buf, size_t len);
 
 static void format_trim_zeros(char *buf)
 {
@@ -80,6 +96,49 @@ static void format_trim_zeros(char *buf)
     }
 }
 
+static void format_number_commas_trim(double value, int max_decimals, char *buf, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+
+    char tmp[64];
+    if (max_decimals < 0) {
+        max_decimals = 0;
+    }
+    snprintf(tmp, sizeof(tmp), "%.*f", max_decimals, value);
+    format_trim_zeros(tmp);
+
+    bool negative = (tmp[0] == '-');
+    const char *start = negative ? tmp + 1 : tmp;
+    const char *dot = strchr(start, '.');
+    size_t int_len = dot ? (size_t)(dot - start) : strlen(start);
+    size_t commas = int_len > 3 ? (int_len - 1) / 3 : 0;
+    size_t tail_len = dot ? strlen(dot) : 0;
+    size_t needed = int_len + commas + tail_len + (negative ? 1 : 0) + 1;
+    if (needed > len) {
+        strncpy(buf, tmp, len - 1);
+        buf[len - 1] = '\0';
+        return;
+    }
+
+    size_t pos = 0;
+    if (negative) {
+        buf[pos++] = '-';
+    }
+    for (size_t i = 0; i < int_len; i++) {
+        if (i > 0 && ((int_len - i) % 3) == 0) {
+            buf[pos++] = ',';
+        }
+        buf[pos++] = start[i];
+    }
+    if (dot) {
+        strncpy(buf + pos, dot, len - pos);
+    } else {
+        buf[pos] = '\0';
+    }
+}
+
 static void format_percent(double change, char *buf, size_t len)
 {
     const char *arrow = "";
@@ -91,9 +150,74 @@ static void format_percent(double change, char *buf, size_t len)
     snprintf(buf, len, "%s%.2f%%", arrow, fabs(change));
 }
 
+static void format_time_label(int64_t ts_ms, char *buf, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+
+    time_t ts = (time_t)(ts_ms / 1000);
+    struct tm timeinfo;
+    if (!localtime_r(&ts, &timeinfo)) {
+        snprintf(buf, len, "--");
+        return;
+    }
+
+    const char *fmt = (s_range == RANGE_1H || s_range == RANGE_24H) ? "%H:%M" : "%m/%d";
+    strftime(buf, len, fmt, &timeinfo);
+}
+
+static void update_axis_labels(double min, double max)
+{
+    if (!s_chart || !s_y_axis || !s_x_axis || !s_chart_points || s_chart_count == 0) {
+        return;
+    }
+
+    char price[24];
+    for (int i = 0; i < Y_LABEL_COUNT; i++) {
+        double t = (double)i / (double)(Y_LABEL_COUNT - 1);
+        double value = max - ((max - min) * t);
+        format_usd_price(value, price, sizeof(price));
+        lv_label_set_text(s_y_labels[i], price);
+    }
+
+    char timebuf[24];
+    for (int i = 0; i < X_LABEL_COUNT; i++) {
+        size_t idx = 0;
+        if (s_chart_count > 1) {
+            idx = (size_t)((i * (s_chart_count - 1)) / (X_LABEL_COUNT - 1));
+        }
+        format_time_label(s_chart_points[idx].ts_ms, timebuf, sizeof(timebuf));
+        lv_label_set_text(s_x_labels[i], timebuf);
+    }
+
+    lv_coord_t axis_h = lv_obj_get_height(s_y_axis);
+    lv_coord_t axis_w = lv_obj_get_width(s_y_axis);
+    for (int i = 0; i < Y_LABEL_COUNT; i++) {
+        lv_coord_t label_h = lv_obj_get_height(s_y_labels[i]);
+        lv_obj_set_width(s_y_labels[i], axis_w);
+        lv_obj_set_style_text_align(s_y_labels[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_coord_t y = (axis_h - label_h) * i / (Y_LABEL_COUNT - 1);
+        lv_obj_set_pos(s_y_labels[i], 0, y);
+    }
+
+    lv_coord_t x_axis_w = lv_obj_get_width(s_x_axis);
+    for (int i = 0; i < X_LABEL_COUNT; i++) {
+        lv_coord_t label_w = lv_obj_get_width(s_x_labels[i]);
+        lv_coord_t x = (x_axis_w * i) / (X_LABEL_COUNT - 1) - (label_w / 2);
+        if (x < 0) {
+            x = 0;
+        }
+        if (x + label_w > x_axis_w) {
+            x = x_axis_w - label_w;
+        }
+        lv_obj_set_pos(s_x_labels[i], x, 0);
+    }
+}
+
 static void update_chip(int index, double change)
 {
-    if (index < 0 || index >= 3 || !s_chip_boxes[index] || !s_chip_labels[index]) {
+    if (index < 0 || index >= CHIP_COUNT || !s_chip_boxes[index] || !s_chip_labels[index]) {
         return;
     }
 
@@ -154,12 +278,17 @@ static void format_usd(double price, char *buf, size_t len)
         return;
     }
 
-    if (price >= 0.01) {
-        snprintf(buf, len, "$%.6f", price);
-        return;
+    int leading_zeros = 0;
+    double scaled = price;
+    while (scaled < 0.1 && leading_zeros < 10) {
+        scaled *= 10.0;
+        leading_zeros++;
     }
 
-    int decimals = 6;
+    int decimals = leading_zeros + 4;
+    if (decimals > 12) {
+        decimals = 12;
+    }
     snprintf(buf, len, "$%.*f", decimals, price);
 }
 
@@ -171,7 +300,7 @@ static void format_usd_price(double price, char *buf, size_t len)
     }
 
     if (price >= 1.0) {
-        int decimals = price >= 1000.0 ? 2 : 4;
+        int decimals = 2;
         char tmp[32];
         snprintf(tmp, sizeof(tmp), "%.*f", decimals, price);
 
@@ -200,13 +329,17 @@ static void format_usd_price(double price, char *buf, size_t len)
         return;
     }
 
-    if (price >= 0.01) {
-        snprintf(buf, len, "$%.6f", price);
-        format_trim_zeros(buf);
-        return;
+    int leading_zeros = 0;
+    double scaled = price;
+    while (scaled < 0.1 && leading_zeros < 10) {
+        scaled *= 10.0;
+        leading_zeros++;
     }
 
-    int decimals = 6;
+    int decimals = leading_zeros + 4;
+    if (decimals > 12) {
+        decimals = 12;
+    }
     snprintf(buf, len, "$%.*f", decimals, price);
 }
 
@@ -217,27 +350,29 @@ static void update_header_values(void)
     }
 
     const coin_t *coin = &s_state->watchlist[s_coin_index];
-    char title[64];
-    snprintf(title, sizeof(title), "%s (%s)", coin->name, coin->symbol);
-    lv_label_set_text(s_title, title);
-
     char price[32];
     format_usd_price(coin->price, price, sizeof(price));
-    lv_label_set_text(s_price, price);
+
+    char title[96];
+    snprintf(title, sizeof(title), "%s (%s) | %s", coin->name, coin->symbol, price);
+    lv_label_set_text(s_title, title);
 
     update_chip(0, coin->change_1h);
     update_chip(1, coin->change_24h);
     update_chip(2, coin->change_7d);
+    update_chip(3, coin->change_30d);
+    update_chip(4, coin->change_1y);
 
     char holdings[32];
-    snprintf(holdings, sizeof(holdings), "Holdings: %.6f", coin->holdings);
-    lv_label_set_text(s_holdings, holdings);
+    format_number_commas_trim(coin->holdings, 6, holdings, sizeof(holdings));
 
     char value[32];
-    format_usd(coin->price * coin->holdings, value, sizeof(value));
-    char value_line[48];
-    snprintf(value_line, sizeof(value_line), "Value: %s", value);
-    lv_label_set_text(s_value, value_line);
+    format_usd_price(coin->price * coin->holdings, value, sizeof(value));
+    format_trim_zeros(value);
+
+    char holdings_line[80];
+    snprintf(holdings_line, sizeof(holdings_line), "Holdings: %s | %s", holdings, value);
+    lv_label_set_text(s_holdings, holdings_line);
 }
 
 static int range_to_days(chart_range_t range)
@@ -258,11 +393,11 @@ static int range_to_days(chart_range_t range)
 
 static void update_range_buttons(void)
 {
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 4; i++) {
         if (!s_range_buttons[i]) {
             continue;
         }
-        bool active = (i == s_range);
+        bool active = (s_range_order[i] == s_range);
         lv_obj_set_style_bg_color(s_range_buttons[i], active ? lv_color_hex(0x2A3142) : lv_color_hex(0x151A24), 0);
         lv_obj_set_style_text_color(s_range_buttons[i], active ? lv_color_hex(0xE6E6E6) : lv_color_hex(0x9AA1AD), 0);
     }
@@ -387,6 +522,7 @@ static void set_chart_data(const chart_point_t *points, size_t count)
     }
 
     lv_chart_refresh(s_chart);
+    update_axis_labels(min, max);
 }
 
 static void chart_event(lv_event_t *e)
@@ -490,12 +626,6 @@ static void range_event(lv_event_t *e)
     request_chart();
 }
 
-static void back_event(lv_event_t *e)
-{
-    (void)e;
-    ui_show_home();
-}
-
 void ui_coin_detail_set_state(app_state_t *state)
 {
     s_state = state;
@@ -514,38 +644,53 @@ lv_obj_t *ui_coin_detail_screen_create(void)
     s_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_pad_top(s_screen, UI_NAV_HEIGHT, 0);
-
-    lv_obj_t *back_btn = lv_btn_create(s_screen);
-    lv_obj_set_size(back_btn, 80, 32);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 16, 12);
-    lv_obj_add_event_cb(back_btn, back_event, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back_btn);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
+    const ui_theme_colors_t *theme = ui_theme_get();
+    uint32_t accent = theme ? theme->accent : 0x00FE8F;
 
     s_title = lv_label_create(s_screen);
-    lv_label_set_text(s_title, "Coin Detail");
+    lv_label_set_text(s_title, "Coin Detail | $0.00");
     lv_obj_set_style_text_color(s_title, lv_color_hex(0xE6E6E6), 0);
     lv_obj_set_style_text_font(s_title, &lv_font_montserrat_22, 0);
-    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, 120, 14);
+    lv_obj_set_width(s_title, 760);
+    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_title, LV_ALIGN_TOP_RIGHT, -16, 4);
 
-    s_price = lv_label_create(s_screen);
-    lv_label_set_text(s_price, "$0.00");
-    lv_obj_set_style_text_color(s_price, lv_color_hex(0xE6E6E6), 0);
-    lv_obj_align(s_price, LV_ALIGN_TOP_LEFT, 16, 54);
+    lv_obj_t *chip_labels = lv_obj_create(s_screen);
+    lv_obj_set_size(chip_labels, CHIP_AREA_WIDTH, 18);
+    lv_obj_align(chip_labels, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_set_style_bg_opa(chip_labels, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chip_labels, 0, 0);
+    lv_obj_set_style_pad_all(chip_labels, 0, 0);
+    lv_obj_set_flex_flow(chip_labels, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(chip_labels, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(chip_labels, CHIP_GAP, 0);
+    lv_obj_clear_flag(chip_labels, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(chip_labels, LV_SCROLLBAR_MODE_OFF);
+
+    static const char *chip_ranges[CHIP_COUNT] = {"Hour", "Day", "Week", "Month", "Year"};
+    for (int i = 0; i < CHIP_COUNT; i++) {
+        lv_obj_t *label = lv_label_create(chip_labels);
+        lv_label_set_text(label, chip_ranges[i]);
+        lv_obj_set_style_text_color(label, lv_color_hex(accent), 0);
+        lv_obj_set_width(label, CHIP_WIDTH);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    }
 
     s_chip_container = lv_obj_create(s_screen);
-    lv_obj_set_size(s_chip_container, 360, 28);
-    lv_obj_align(s_chip_container, LV_ALIGN_TOP_LEFT, 16, 80);
+    lv_obj_set_size(s_chip_container, CHIP_AREA_WIDTH, 28);
+    lv_obj_align(s_chip_container, LV_ALIGN_TOP_MID, 0, 88);
     lv_obj_set_style_bg_opa(s_chip_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chip_container, 0, 0);
     lv_obj_set_style_pad_all(s_chip_container, 0, 0);
     lv_obj_set_flex_flow(s_chip_container, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(s_chip_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(s_chip_container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_chip_container, CHIP_GAP, 0);
+    lv_obj_clear_flag(s_chip_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_chip_container, LV_SCROLLBAR_MODE_OFF);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < CHIP_COUNT; i++) {
         lv_obj_t *chip = lv_obj_create(s_chip_container);
-        lv_obj_set_size(chip, 110, 24);
+        lv_obj_set_size(chip, CHIP_WIDTH, 24);
         lv_obj_set_style_bg_color(chip, lv_color_hex(0x10141C), 0);
         lv_obj_set_style_border_width(chip, 1, 0);
         lv_obj_set_style_border_color(chip, lv_color_hex(0x2A3142), 0);
@@ -554,6 +699,8 @@ lv_obj_t *ui_coin_detail_screen_create(void)
         lv_obj_set_style_pad_right(chip, 8, 0);
         lv_obj_set_style_pad_top(chip, 4, 0);
         lv_obj_set_style_pad_bottom(chip, 4, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(chip, LV_SCROLLBAR_MODE_OFF);
 
         lv_obj_t *label = lv_label_create(chip);
         lv_label_set_text(label, "--");
@@ -567,54 +714,90 @@ lv_obj_t *ui_coin_detail_screen_create(void)
     s_holdings = lv_label_create(s_screen);
     lv_label_set_text(s_holdings, "Holdings: 0");
     lv_obj_set_style_text_color(s_holdings, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(s_holdings, LV_ALIGN_TOP_LEFT, 16, 110);
-
-    s_value = lv_label_create(s_screen);
-    lv_label_set_text(s_value, "Value: $0.00");
-    lv_obj_set_style_text_color(s_value, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(s_value, LV_ALIGN_TOP_LEFT, 16, 132);
+    lv_obj_set_width(s_holdings, 760);
+    lv_obj_set_style_text_align(s_holdings, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_holdings, LV_ALIGN_TOP_RIGHT, -16, 32);
 
     s_chart = lv_chart_create(s_screen);
-    lv_obj_set_size(s_chart, 760, 180);
-    lv_obj_align(s_chart, LV_ALIGN_TOP_LEFT, 16, 170);
+    lv_obj_set_size(s_chart, 700, 200);
+    lv_obj_align(s_chart, LV_ALIGN_TOP_LEFT, 16, 146);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_update_mode(s_chart, LV_CHART_UPDATE_MODE_SHIFT);
     lv_chart_set_point_count(s_chart, 30);
+    lv_obj_set_style_size(s_chart, CHART_POINT_SIZE, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_chart, lv_color_hex(0x10141C), 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
     lv_obj_add_event_cb(s_chart, chart_event, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_chart, chart_event, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_chart, chart_event, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_chart, chart_event, LV_EVENT_PRESS_LOST, NULL);
-    s_series = lv_chart_add_series(s_chart, lv_color_hex(0x4F77FF), LV_CHART_AXIS_PRIMARY_Y);
+    s_series = lv_chart_add_series(s_chart, lv_color_hex(theme ? theme->accent : 0x4F77FF), LV_CHART_AXIS_PRIMARY_Y);
+
+    s_y_axis = lv_obj_create(s_screen);
+    lv_obj_set_size(s_y_axis, Y_AXIS_WIDTH, 200);
+    lv_obj_set_style_bg_opa(s_y_axis, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_y_axis, 0, 0);
+    lv_obj_set_style_pad_all(s_y_axis, 0, 0);
+    lv_obj_clear_flag(s_y_axis, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_y_axis, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align_to(s_y_axis, s_chart, LV_ALIGN_OUT_RIGHT_TOP, 8, 0);
+
+    for (int i = 0; i < Y_LABEL_COUNT; i++) {
+        s_y_labels[i] = lv_label_create(s_y_axis);
+        lv_label_set_text(s_y_labels[i], "--");
+        lv_obj_set_style_text_color(s_y_labels[i], lv_color_hex(0x6B717B), 0);
+        lv_obj_set_style_text_font(s_y_labels[i], &lv_font_montserrat_12, 0);
+    }
+
+    s_x_axis = lv_obj_create(s_screen);
+    lv_obj_set_size(s_x_axis, 700, 18);
+    lv_obj_set_style_bg_opa(s_x_axis, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_x_axis, 0, 0);
+    lv_obj_set_style_pad_all(s_x_axis, 0, 0);
+    lv_obj_clear_flag(s_x_axis, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_x_axis, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align_to(s_x_axis, s_chart, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
+
+    for (int i = 0; i < X_LABEL_COUNT; i++) {
+        s_x_labels[i] = lv_label_create(s_x_axis);
+        lv_label_set_text(s_x_labels[i], "--");
+        lv_obj_set_style_text_color(s_x_labels[i], lv_color_hex(0x6B717B), 0);
+        lv_obj_set_style_text_font(s_x_labels[i], &lv_font_montserrat_12, 0);
+    }
 
     s_status = lv_label_create(s_screen);
     lv_label_set_text(s_status, "");
     lv_obj_set_style_text_color(s_status, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 16, 356);
+    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 16, 378);
 
     lv_obj_t *range_bar = lv_obj_create(s_screen);
-    lv_obj_set_size(range_bar, 760, 40);
-    lv_obj_align(range_bar, LV_ALIGN_TOP_LEFT, 16, 376);
+    lv_obj_set_size(range_bar, 700, 40);
+    lv_obj_align(range_bar, LV_ALIGN_TOP_LEFT, 16, 400);
     lv_obj_set_style_bg_color(range_bar, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_border_width(range_bar, 0, 0);
     lv_obj_set_flex_flow(range_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(range_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(range_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(range_bar, LV_SCROLLBAR_MODE_OFF);
 
-    static const char *labels[] = {"1H", "24H", "7D", "30D", "1Y"};
-    for (int i = 0; i < 5; i++) {
+    static const char *labels[] = {"1 Hour", "24 Hours", "7 Days", "1 Year"};
+    for (int i = 0; i < 4; i++) {
         lv_obj_t *btn = lv_btn_create(range_bar);
-        lv_obj_set_size(btn, 120, 30);
+        lv_obj_set_size(btn, 160, 30);
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x151A24), 0);
-        lv_obj_add_event_cb(btn, range_event, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+        lv_obj_add_event_cb(btn, range_event, LV_EVENT_CLICKED, (void *)(uintptr_t)s_range_order[i]);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(btn, LV_SCROLLBAR_MODE_OFF);
         lv_obj_t *label = lv_label_create(btn);
         lv_label_set_text(label, labels[i]);
         lv_obj_center(label);
         s_range_buttons[i] = btn;
     }
 
-    ui_nav_attach(s_screen, UI_NAV_HOME);
+    ui_nav_attach_back_only(s_screen);
+    lv_obj_move_foreground(s_title);
+    lv_obj_move_foreground(s_holdings);
     update_range_buttons();
     hide_tooltip();
     return s_screen;

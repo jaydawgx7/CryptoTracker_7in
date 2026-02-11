@@ -280,6 +280,23 @@ void wifi_manager_get_state(wifi_state_t *state, int *rssi)
     }
 }
 
+bool wifi_manager_get_connected_ssid(char *out, size_t len)
+{
+    if (!out || len == 0) {
+        return false;
+    }
+
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        strncpy(out, (const char *)ap_info.ssid, len - 1);
+        out[len - 1] = '\0';
+        return true;
+    }
+
+    out[0] = '\0';
+    return false;
+}
+
 esp_err_t wifi_manager_scan(wifi_scan_result_t *results, size_t max_results, size_t *out_count)
 {
     if (!results || max_results == 0) {

@@ -29,6 +29,7 @@ esp_err_t coingecko_client_init(void);
 esp_err_t coingecko_client_fetch_coin_list(coin_list_t *list);
 esp_err_t coingecko_client_search_coins(const char *query, coin_list_t *list, size_t limit);
 esp_err_t coingecko_client_fetch_markets(app_state_t *state);
+esp_err_t coingecko_client_fetch_markets_mode(app_state_t *state, bool update_price);
 esp_err_t coingecko_client_get_chart(const char *coin_id, int days, const chart_point_t **points, size_t *count);
 esp_err_t coingecko_client_get_chart_cached(const char *coin_id, int days, const chart_point_t **points, size_t *count);
 esp_err_t coingecko_client_load_cached_list(coin_list_t *list);

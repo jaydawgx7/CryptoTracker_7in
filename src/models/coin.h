@@ -11,6 +11,8 @@ typedef struct {
     double change_1h;
     double change_24h;
     double change_7d;
+    double change_30d;
+    double change_1y;
     double high_24h;
     double low_24h;
     double market_cap;

@@ -8,6 +8,7 @@
 
 void ui_init(void);
 void ui_set_app_state(const app_state_t *state);
+void ui_apply_theme(bool dark_mode);
 void ui_show_add_coin(void);
 void ui_show_alerts(void);
 void ui_show_coin_detail(size_t index);

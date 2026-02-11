@@ -199,13 +199,26 @@ esp_err_t display_driver_init(void)
                 .vsync_idle_low = false,
                 .de_idle_high = false,
                 .pclk_active_neg = CT_LCD_PCLK_ACTIVE_NEG,
-                .pclk_idle_high = true
+                .pclk_idle_high = CT_LCD_PCLK_IDLE_HIGH
             }
         },
         .flags = {
-            .fb_in_psram = true
+            .fb_in_psram = CT_LCD_FB_IN_PSRAM
         }
     };
+
+    ESP_LOGI(TAG,
+             "LCD cfg: PCLK=%u Hz HSYNC=%u/%u/%u VSYNC=%u/%u/%u pclk_neg=%u idle_high=%u fb_psram=%u",
+             (unsigned)CT_LCD_PCLK_HZ,
+             (unsigned)CT_LCD_HSYNC_PW,
+             (unsigned)CT_LCD_HSYNC_BP,
+             (unsigned)CT_LCD_HSYNC_FP,
+             (unsigned)CT_LCD_VSYNC_PW,
+             (unsigned)CT_LCD_VSYNC_BP,
+             (unsigned)CT_LCD_VSYNC_FP,
+             (unsigned)CT_LCD_PCLK_ACTIVE_NEG,
+             (unsigned)CT_LCD_PCLK_IDLE_HIGH,
+             (unsigned)CT_LCD_FB_IN_PSRAM);
 
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &s_panel));
 
