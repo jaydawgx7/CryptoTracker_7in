@@ -3,12 +3,14 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_ota_ops.h"
 
 #include "models/app_state.h"
 #include "services/alert_manager.h"
 #include "services/control_mcu.h"
 #include "services/coingecko_client.h"
 #include "services/display_driver.h"
+#include "services/http_server.h"
 #include "services/i2c_bus.h"
 #include "services/nvs_store.h"
 #include "services/scheduler.h"
@@ -31,6 +33,34 @@
 
 static const char *TAG = "app_main";
 static app_state_t s_app_state;
+
+static void log_ota_partitions(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+
+    if (running) {
+        ESP_LOGI(TAG, "Running partition: %s (0x%08X, 0x%X)", running->label, running->address,
+                 running->size);
+    }
+    if (next) {
+        ESP_LOGI(TAG, "Next update partition: %s (0x%08X, 0x%X)", next->label, next->address,
+                 next->size);
+    }
+}
+
+static void ota_mark_valid_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "OTA app marked valid");
+    } else {
+        ESP_LOGW(TAG, "OTA mark valid failed: %s", esp_err_to_name(err));
+    }
+    vTaskDelete(NULL);
+}
 
 static void alert_trigger_cb(const alert_log_t *entry)
 {
@@ -80,6 +110,8 @@ void app_main(void)
 {
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_ERROR);
 
+    log_ota_partitions();
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -111,6 +143,8 @@ void app_main(void)
     if (CT_WIFI_ENABLE) {
         ESP_ERROR_CHECK(wifi_manager_init());
         ESP_ERROR_CHECK(coingecko_client_init());
+        ESP_ERROR_CHECK(http_server_init());
+        http_server_set_state(&s_app_state);
     } else {
         ESP_LOGW(TAG, "Wi-Fi disabled by config");
     }
@@ -124,6 +158,11 @@ void app_main(void)
     alert_manager_set_state(&s_app_state);
     alert_manager_set_callback(alert_trigger_cb);
     ESP_ERROR_CHECK(scheduler_init(&s_app_state));
+
+    BaseType_t mark_ok = xTaskCreate(ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 3, NULL);
+    if (mark_ok != pdPASS) {
+        ESP_LOGW(TAG, "Failed to start OTA mark valid task");
+    }
 
     ESP_LOGI(TAG, "CryptoTracker initialized");
 }

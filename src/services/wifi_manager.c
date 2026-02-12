@@ -297,6 +297,28 @@ bool wifi_manager_get_connected_ssid(char *out, size_t len)
     return false;
 }
 
+bool wifi_manager_get_ip(char *out, size_t len)
+{
+    if (!out || len == 0) {
+        return false;
+    }
+
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) {
+        out[0] = '\0';
+        return false;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        out[0] = '\0';
+        return false;
+    }
+
+    snprintf(out, len, IPSTR, IP2STR(&ip_info.ip));
+    return true;
+}
+
 esp_err_t wifi_manager_scan(wifi_scan_result_t *results, size_t max_results, size_t *out_count)
 {
     if (!results || max_results == 0) {
