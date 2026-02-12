@@ -179,12 +179,12 @@ pio device monitor -b 115200
 
 ## Screenshots
 
-![Home](screenshots/Home.png)
-![Coin Detail](screenshots/Crypto_Detail.png)
-![Add Coin](screenshots/Add_Coin.png)
-![Settings](screenshots/Settings.png)
-![Theme Settings](screenshots/Theme_Settings.png)
-![Purple Theme](screenshots/Purple_Theme.png)
+![Home](Screenshots/Home.png)
+![Coin Detail](Screenshots/Crypto_Detail.png)
+![Add Coin](Screenshots/Add_Coin.png)
+![Settings](Screenshots/Settings.png)
+![Theme Settings](Screenshots/Theme_Settings.png)
+![Purple Theme](Screenshots/Purple_Theme.png)
 
 ## Features
 
