@@ -5,12 +5,18 @@
 #include "lvgl.h"
 
 #include "services/control_mcu.h"
+#include "services/github_update.h"
 #include "services/nvs_store.h"
+#include "services/ota_update.h"
 #include "services/wifi_manager.h"
+
+#include "esp_err.h"
+#include "esp_timer.h"
 
 #include "ui/ui.h"
 #include "ui/ui_nav.h"
 #include "ui/ui_theme.h"
+#include "app_version.h"
 #include "models/app_state.h"
 
 #ifndef CT_KEYBOARD_ENABLE
@@ -35,7 +41,18 @@ static lv_obj_t *s_pass_field = NULL;
 static lv_obj_t *s_wifi_keyboard = NULL;
 static lv_obj_t *s_wifi_status_label = NULL;
 static lv_obj_t *s_wifi_ssid_label = NULL;
+static lv_obj_t *s_wifi_ip_label = NULL;
 static lv_timer_t *s_wifi_status_timer = NULL;
+static lv_obj_t *s_ota_status_label = NULL;
+static lv_obj_t *s_ota_progress = NULL;
+static lv_timer_t *s_ota_status_timer = NULL;
+static lv_obj_t *s_update_check_btn = NULL;
+static lv_obj_t *s_update_install_btn = NULL;
+static lv_obj_t *s_update_install_label = NULL;
+static lv_obj_t *s_update_status_label = NULL;
+static lv_obj_t *s_update_last_label = NULL;
+static lv_obj_t *s_update_notes_label = NULL;
+static lv_timer_t *s_update_status_timer = NULL;
 static lv_obj_t *s_brightness_slider = NULL;
 static lv_obj_t *s_refresh_slider = NULL;
 static lv_obj_t *s_refresh_value = NULL;
@@ -73,6 +90,12 @@ static void update_source_buttons(void);
 static void apply_refresh_range(void);
 static uint16_t clamp_refresh_value(int32_t value);
 static void style_settings_switch(lv_obj_t *toggle);
+static void update_ota_status(void);
+static void ota_status_timer_cb(lv_timer_t *timer);
+static void update_update_status(void);
+static void update_status_timer_cb(lv_timer_t *timer);
+static void github_check_event(lv_event_t *e);
+static void github_install_event(lv_event_t *e);
 
 static const uint32_t s_color_presets[8] = {
     0x00FE8F,
@@ -189,12 +212,200 @@ static void update_wifi_status_label(void)
             lv_label_set_text(s_wifi_ssid_label, "SSID: --");
         }
     }
+
+    if (s_wifi_ip_label) {
+        char ip[16] = {0};
+        bool has_ip = wifi_manager_get_ip(ip, sizeof(ip));
+        if (state == WIFI_STATE_CONNECTED && has_ip) {
+            char ip_line[32];
+            snprintf(ip_line, sizeof(ip_line), "IP: %s", ip);
+            lv_label_set_text(s_wifi_ip_label, ip_line);
+        } else if (state == WIFI_STATE_CONNECTING) {
+            lv_label_set_text(s_wifi_ip_label, "IP: Connecting");
+        } else {
+            lv_label_set_text(s_wifi_ip_label, "IP: --");
+        }
+    }
 }
 
 static void wifi_status_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     update_wifi_status_label();
+}
+
+static void update_ota_status(void)
+{
+    if (!s_ota_status_label) {
+        return;
+    }
+
+    ota_status_t status = {0};
+    ota_update_get_status(&status);
+
+    int progress = 0;
+    char text[128];
+
+    if (status.state == OTA_STATE_DOWNLOADING) {
+        progress = status.percent;
+        if (progress < 0) {
+            progress = 0;
+        } else if (progress > 100) {
+            progress = 100;
+        }
+        if (status.message[0] != '\0') {
+            snprintf(text, sizeof(text), "Status: %s (%d%%)", status.message, progress);
+        } else {
+            snprintf(text, sizeof(text), "Status: Downloading (%d%%)", progress);
+        }
+    } else if (status.state == OTA_STATE_SUCCESS) {
+        progress = 100;
+        if (status.message[0] != '\0') {
+            snprintf(text, sizeof(text), "Status: %s", status.message);
+        } else {
+            snprintf(text, sizeof(text), "Status: Success");
+        }
+    } else if (status.state == OTA_STATE_FAILED) {
+        if (status.message[0] != '\0') {
+            snprintf(text, sizeof(text), "Status: %s (err %d)", status.message, status.last_error);
+        } else {
+            snprintf(text, sizeof(text), "Status: Failed (err %d)", status.last_error);
+        }
+    } else {
+        snprintf(text, sizeof(text), "Status: Idle");
+    }
+
+    lv_label_set_text(s_ota_status_label, text);
+    if (s_ota_progress) {
+        lv_bar_set_value(s_ota_progress, progress, LV_ANIM_OFF);
+    }
+}
+
+static void ota_status_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    update_ota_status();
+}
+
+static void update_update_status(void)
+{
+    github_update_status_t status = {0};
+    github_update_get_status(&status);
+
+    if (s_update_status_label) {
+        const char *tag = status.latest_tag[0] ? status.latest_tag : "--";
+        switch (status.state) {
+            case GITHUB_UPDATE_CHECKING:
+                lv_label_set_text(s_update_status_label, "Checking GitHub...");
+                break;
+            case GITHUB_UPDATE_AVAILABLE: {
+                char text[64];
+                snprintf(text, sizeof(text), "Update available: %s", tag);
+                lv_label_set_text(s_update_status_label, text);
+                break;
+            }
+            case GITHUB_UPDATE_UP_TO_DATE:
+                lv_label_set_text(s_update_status_label, "Up to date");
+                break;
+            case GITHUB_UPDATE_RATE_LIMITED:
+                lv_label_set_text(s_update_status_label, "Rate limited, try later");
+                break;
+            case GITHUB_UPDATE_FAILED:
+                lv_label_set_text(s_update_status_label, "Update check failed");
+                break;
+            default:
+                lv_label_set_text(s_update_status_label, "Status: --");
+                break;
+        }
+    }
+
+    if (s_update_last_label) {
+        if (status.last_checked_ms <= 0) {
+            lv_label_set_text(s_update_last_label, "Last checked: --");
+        } else {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t delta_ms = now_ms - status.last_checked_ms;
+            int total_sec = (delta_ms > 0) ? (int)(delta_ms / 1000) : 0;
+            int mins = total_sec / 60;
+            int secs = total_sec % 60;
+            char text[48];
+            if (mins > 0) {
+                snprintf(text, sizeof(text), "Last checked: %dm %ds ago", mins, secs);
+            } else {
+                snprintf(text, sizeof(text), "Last checked: %ds ago", secs);
+            }
+            lv_label_set_text(s_update_last_label, text);
+        }
+    }
+
+    if (s_update_notes_label) {
+        if (status.notes[0] != '\0') {
+            lv_label_set_text(s_update_notes_label, status.notes);
+        } else {
+            lv_label_set_text(s_update_notes_label, "Release notes: --");
+        }
+    }
+
+    if (s_update_install_btn && s_update_install_label) {
+        if (status.state == GITHUB_UPDATE_AVAILABLE && status.download_url[0] != '\0') {
+            char text[48];
+            const char *tag = status.latest_tag[0] ? status.latest_tag : "Update";
+            snprintf(text, sizeof(text), "Install %s", tag);
+            lv_label_set_text(s_update_install_label, text);
+            lv_obj_clear_flag(s_update_install_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_update_install_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void update_status_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    update_update_status();
+}
+
+static void github_check_event(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = github_update_start_check();
+    if (err == ESP_OK) {
+        if (s_update_status_label) {
+            lv_label_set_text(s_update_status_label, "Checking GitHub...");
+        }
+    } else if (s_update_status_label) {
+        char text[64];
+        snprintf(text, sizeof(text), "Check failed: %s", esp_err_to_name(err));
+        lv_label_set_text(s_update_status_label, text);
+    }
+}
+
+static void github_install_event(lv_event_t *e)
+{
+    (void)e;
+    github_update_status_t status = {0};
+    github_update_get_status(&status);
+
+    if (status.state != GITHUB_UPDATE_AVAILABLE || status.download_url[0] == '\0') {
+        if (s_ota_status_label) {
+            lv_label_set_text(s_ota_status_label, "Status: No update URL");
+        }
+        return;
+    }
+
+    esp_err_t err = ota_update_start(status.download_url);
+    if (err == ESP_OK) {
+        if (s_ota_status_label) {
+            lv_label_set_text(s_ota_status_label, "Status: Starting");
+        }
+        if (s_ota_progress) {
+            lv_bar_set_value(s_ota_progress, 0, LV_ANIM_OFF);
+        }
+    } else if (s_ota_status_label) {
+        char text[96];
+        snprintf(text, sizeof(text), "Status: %s", esp_err_to_name(err));
+        lv_label_set_text(s_ota_status_label, text);
+    }
 }
 
 static void brightness_changed(lv_event_t *e)
@@ -1348,6 +1559,94 @@ lv_obj_t *ui_settings_screen_create(void)
     lv_obj_set_style_text_color(s_wifi_ssid_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
     lv_obj_align(s_wifi_ssid_label, LV_ALIGN_TOP_LEFT, 0, 82);
 
+    s_wifi_ip_label = lv_label_create(wifi_card);
+    lv_label_set_text(s_wifi_ip_label, "IP: --");
+    lv_obj_set_style_text_color(s_wifi_ip_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+    lv_obj_align(s_wifi_ip_label, LV_ALIGN_TOP_LEFT, 0, 106);
+
+    lv_obj_t *ota_label = lv_label_create(screen);
+    lv_label_set_text(ota_label, "Firmware Update");
+    lv_obj_set_style_text_color(ota_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_align(ota_label, LV_ALIGN_TOP_LEFT, 420, 230);
+
+    lv_obj_t *ota_card = lv_obj_create(screen);
+    lv_obj_set_size(ota_card, 360, 200);
+    lv_obj_align(ota_card, LV_ALIGN_TOP_LEFT, 420, 252);
+    lv_obj_set_style_bg_color(ota_card, lv_color_hex(0x1A1D26), 0);
+    lv_obj_set_style_border_width(ota_card, 0, 0);
+    lv_obj_set_style_radius(ota_card, 12, 0);
+    lv_obj_set_style_pad_all(ota_card, 12, 0);
+    lv_obj_clear_flag(ota_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(ota_card, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *version_label = lv_label_create(ota_card);
+    char version_text[32];
+    snprintf(version_text, sizeof(version_text), "Current: %s", APP_VERSION);
+    lv_label_set_text(version_label, version_text);
+    lv_obj_set_style_text_color(version_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+    lv_obj_align(version_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    s_update_check_btn = lv_btn_create(ota_card);
+    lv_obj_set_size(s_update_check_btn, 140, 28);
+    lv_obj_align(s_update_check_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
+    style_button(s_update_check_btn);
+    lv_obj_add_event_cb(s_update_check_btn, github_check_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *check_label = lv_label_create(s_update_check_btn);
+    lv_label_set_text(check_label, "Check for update");
+    style_button_label(check_label);
+    lv_obj_center(check_label);
+
+    s_update_status_label = lv_label_create(ota_card);
+    lv_label_set_text(s_update_status_label, "Status: --");
+    lv_obj_set_style_text_color(s_update_status_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+    lv_obj_align(s_update_status_label, LV_ALIGN_TOP_LEFT, 0, 32);
+
+    s_update_last_label = lv_label_create(ota_card);
+    lv_label_set_text(s_update_last_label, "Last checked: --");
+    lv_obj_set_style_text_color(s_update_last_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_align(s_update_last_label, LV_ALIGN_TOP_LEFT, 0, 50);
+
+    lv_obj_t *notes_box = lv_obj_create(ota_card);
+    lv_obj_set_size(notes_box, 336, 48);
+    lv_obj_align(notes_box, LV_ALIGN_TOP_LEFT, 0, 70);
+    lv_obj_set_style_bg_color(notes_box, lv_color_hex(0x0F1117), 0);
+    lv_obj_set_style_border_width(notes_box, 0, 0);
+    lv_obj_set_style_radius(notes_box, 6, 0);
+    lv_obj_set_style_pad_all(notes_box, 6, 0);
+    lv_obj_set_scroll_dir(notes_box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(notes_box, LV_SCROLLBAR_MODE_AUTO);
+
+    s_update_notes_label = lv_label_create(notes_box);
+    lv_label_set_text(s_update_notes_label, "Release notes: --");
+    lv_label_set_long_mode(s_update_notes_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_update_notes_label, 320);
+    lv_obj_set_style_text_color(s_update_notes_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+
+    s_update_install_btn = lv_btn_create(ota_card);
+    lv_obj_set_size(s_update_install_btn, 150, 28);
+    lv_obj_align(s_update_install_btn, LV_ALIGN_TOP_RIGHT, 0, 124);
+    style_button(s_update_install_btn);
+    lv_obj_add_event_cb(s_update_install_btn, github_install_event, LV_EVENT_CLICKED, NULL);
+    s_update_install_label = lv_label_create(s_update_install_btn);
+    lv_label_set_text(s_update_install_label, "Install");
+    style_button_label(s_update_install_label);
+    lv_obj_center(s_update_install_label);
+    lv_obj_add_flag(s_update_install_btn, LV_OBJ_FLAG_HIDDEN);
+
+    s_ota_progress = lv_bar_create(ota_card);
+    lv_obj_set_size(s_ota_progress, 336, 10);
+    lv_obj_align(s_ota_progress, LV_ALIGN_TOP_LEFT, 0, 154);
+    lv_bar_set_range(s_ota_progress, 0, 100);
+    lv_bar_set_value(s_ota_progress, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_ota_progress, lv_color_hex(0x0F1117), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_ota_progress, lv_color_hex(SETTINGS_TEXT_COLOR), LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(s_ota_progress, 0, LV_PART_MAIN);
+
+    s_ota_status_label = lv_label_create(ota_card);
+    lv_label_set_text(s_ota_status_label, "Status: Idle");
+    lv_obj_set_style_text_color(s_ota_status_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+    lv_obj_align(s_ota_status_label, LV_ALIGN_TOP_LEFT, 0, 168);
+
     lv_obj_t *footer_row = lv_obj_create(screen);
     lv_obj_set_size(footer_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(footer_row, LV_OPA_TRANSP, 0);
@@ -1369,6 +1668,16 @@ lv_obj_t *ui_settings_screen_create(void)
     update_wifi_status_label();
     if (!s_wifi_status_timer) {
         s_wifi_status_timer = lv_timer_create(wifi_status_timer_cb, 1000, NULL);
+    }
+
+    update_ota_status();
+    if (!s_ota_status_timer) {
+        s_ota_status_timer = lv_timer_create(ota_status_timer_cb, 500, NULL);
+    }
+
+    update_update_status();
+    if (!s_update_status_timer) {
+        s_update_status_timer = lv_timer_create(update_status_timer_cb, 1000, NULL);
     }
 
     apply_prefs_to_controls();

@@ -40,4 +40,5 @@ typedef struct {
     coin_t watchlist[MAX_WATCHLIST];
     size_t watchlist_count;
     ui_prefs_t prefs;
+    bool needs_restore;
 } app_state_t;

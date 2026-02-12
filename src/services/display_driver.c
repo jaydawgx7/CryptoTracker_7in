@@ -11,6 +11,8 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
+#include "services/screenshot.h"
+
 static const char *TAG = "display_driver";
 
 static esp_lcd_panel_handle_t s_panel = NULL;
@@ -83,6 +85,9 @@ static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
     lv_disp_flush_ready(drv);
     return;
 #endif
+
+    screenshot_update(area, color_map);
+
     int x1 = area->x1;
     int y1 = area->y1;
     int x2 = area->x2 + 1;
@@ -136,6 +141,8 @@ static void display_test_pattern(void)
 esp_err_t display_driver_init(void)
 {
     lv_init();
+
+    screenshot_init(CT_LCD_H_RES, CT_LCD_V_RES);
 
 
 #if !CT_LVGL_SKIP_DISPLAY

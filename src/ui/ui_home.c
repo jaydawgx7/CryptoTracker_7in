@@ -65,6 +65,7 @@ static wifi_state_t s_last_wifi_state = WIFI_STATE_DISCONNECTED;
 static int s_last_rssi = 0;
 static uint32_t s_last_updated_age = 0;
 static bool s_last_rate_limited = false;
+static bool s_restore_toast_shown = false;
 
 static uint32_t home_accent_color(void)
 {
@@ -1218,11 +1219,12 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
     format_percent(coin->change_1h, buf_1h, sizeof(buf_1h));
     format_percent(coin->change_24h, buf_24h, sizeof(buf_24h));
     format_percent(coin->change_7d, buf_7d, sizeof(buf_7d));
-    format_holdings(coin->holdings, buf_hold, sizeof(buf_hold));
     bool show_values = !s_state || s_state->prefs.show_values;
     if (show_values) {
+        format_holdings(coin->holdings, buf_hold, sizeof(buf_hold));
         format_usd(coin->price * coin->holdings, buf_value, sizeof(buf_value));
     } else {
+        snprintf(buf_hold, sizeof(buf_hold), "--");
         snprintf(buf_value, sizeof(buf_value), "--");
     }
 
@@ -1232,6 +1234,9 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
         value_color = color_stale;
     }
     lv_color_t holdings_color = s_offline ? color_stale : lv_color_hex(0xC5CBD6);
+    if (!show_values) {
+        holdings_color = color_stale;
+    }
     lv_color_t pct_1h_color = s_offline ? color_neutral : percent_color(coin->change_1h);
     lv_color_t pct_24h_color = s_offline ? color_neutral : percent_color(coin->change_24h);
     lv_color_t pct_7d_color = s_offline ? color_neutral : percent_color(coin->change_7d);
@@ -1525,6 +1530,10 @@ void ui_home_set_state(const app_state_t *state)
     if (state) {
         s_sort_field = state->prefs.sort_field;
         s_sort_desc = state->prefs.sort_desc;
+        if (state->needs_restore && !s_restore_toast_shown) {
+            show_toast("No saved watchlist. Upload JSON to restore.");
+            s_restore_toast_shown = true;
+        }
     }
     if (s_values_checkbox) {
         if (state && state->prefs.show_values) {

@@ -363,15 +363,20 @@ static void update_header_values(void)
     update_chip(3, coin->change_30d);
     update_chip(4, coin->change_1y);
 
-    char holdings[32];
-    format_number_commas_trim(coin->holdings, 6, holdings, sizeof(holdings));
-
-    char value[32];
-    format_usd_price(coin->price * coin->holdings, value, sizeof(value));
-    format_trim_zeros(value);
-
     char holdings_line[80];
-    snprintf(holdings_line, sizeof(holdings_line), "Holdings: %s | %s", holdings, value);
+    bool show_values = !s_state || s_state->prefs.show_values;
+    if (show_values) {
+        char holdings[32];
+        format_number_commas_trim(coin->holdings, 6, holdings, sizeof(holdings));
+
+        char value[32];
+        format_usd_price(coin->price * coin->holdings, value, sizeof(value));
+        format_trim_zeros(value);
+
+        snprintf(holdings_line, sizeof(holdings_line), "Holdings: %s | %s", holdings, value);
+    } else {
+        snprintf(holdings_line, sizeof(holdings_line), "Holdings: -- | $--.--");
+    }
     lv_label_set_text(s_holdings, holdings_line);
 }
 

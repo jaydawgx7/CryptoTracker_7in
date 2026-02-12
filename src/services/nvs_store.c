@@ -255,12 +255,14 @@ esp_err_t nvs_store_load_app_state(app_state_t *state)
 
     memset(state, 0, sizeof(*state));
     set_default_prefs(&state->prefs);
+    state->needs_restore = false;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open_namespace(&handle);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "NVS open failed: %d", err);
         set_default_watchlist(state);
+        state->needs_restore = true;
         return err;
     }
 
@@ -271,10 +273,12 @@ esp_err_t nvs_store_load_app_state(app_state_t *state)
         cJSON *array = cJSON_ParseWithLength((const char *)watchlist_blob, watchlist_len);
         if (!json_to_watchlist(state, array)) {
             set_default_watchlist(state);
+            state->needs_restore = true;
         }
         cJSON_Delete(array);
     } else {
         set_default_watchlist(state);
+        state->needs_restore = true;
     }
     free(watchlist_blob);
 
