@@ -1,8 +1,22 @@
 # CryptoTracker
 
+Disclaimer: This is a personal side project fully coded by AI (I'm not a developer) and shared to help others get their devices up and running.
+
 [![Build](https://img.shields.io/badge/build-manual-lightgrey)](https://github.com/jaydawgx7/CryptoTracker_7in/actions)
 
 ESP-IDF + LVGL crypto portfolio tracker for the Elecrow CrowPanel Advance 7.0" ESP32-S3 (PCB V1.3).
+
+Repo: https://github.com/jaydawgx7/CryptoTracker_7in
+
+## Highlights
+
+- Dual data sources: Kraken (prices) with CoinGecko fallback + percent sync.
+- Modern LVGL UI: watchlist, coin detail, add coin, alerts, settings.
+- Persistent preferences (theme, sort, refresh rate, show values, brightness).
+- Privacy toggle to hide portfolio values.
+- Alerts with toast + optional buzzer.
+- GitHub Releases OTA updates with rollback support.
+- Web UI endpoints for screenshots and watchlist backup/restore.
 
 ## Build and Flash (PlatformIO)
 
@@ -18,19 +32,84 @@ pio device monitor -b 115200
 
 ## First Run Flow
 
-- Boot to the home screen.
-- Open Settings to confirm the I2C scan shows `0x30`, `0x51`, and `0x5D`.
-- Connect WiFi (UI stub currently).
-- Add BTC and XRP to the watchlist (default watchlist to be wired in NVS).
+- Boot to Home.
+- Open Settings and confirm touch and brightness controls respond.
+- Connect WiFi (Settings -> WiFi).
+- Add coins from Add Coin.
+
+## Screenshots
+
+![Home](screenshots/Home.png)
+![Coin Detail](screenshots/Crypto_Detail.png)
+![Add Coin](screenshots/Add_Coin.png)
+![Settings](screenshots/Settings.png)
+![Theme Settings](screenshots/Theme_Settings.png)
+![Purple Theme](screenshots/Purple_Theme.png)
+
+## Features
+
+### Home
+- Watchlist with sorting (Symbol, Price, 1h, 24h, 7d, Value).
+- Long-press row actions: edit holdings, alerts, pin, remove.
+- Show values toggle (privacy mode).
+
+### Coin Detail
+- Title with live price, holdings/value summary.
+- Percent chips: 1h, 24h, 7d, 30d, 1y.
+- Chart with axis labels + range buttons.
+
+### Settings
+- WiFi manager.
+- Brightness slider (control MCU).
+- Theme and UI preferences.
+- Refresh interval.
+- Buzzer test.
+- Firmware update via GitHub Releases (check + install).
+
+## Web Endpoints
+
+- `GET /` simple page with screenshot and watchlist tools.
+- `GET /screenshot.bmp` current framebuffer screenshot.
+- `GET /watchlist.json` download watchlist JSON.
+- `POST /watchlist.json` upload watchlist JSON.
+- `POST /ota` OTA install from JSON body `{ "url": "http://.../firmware.bin" }`.
+- `GET /ota/status` OTA progress JSON.
+
+## OTA via GitHub Releases
+
+1. Build the firmware:
+
+```
+pio run
+```
+
+2. Find the binary:
+
+```
+.pio/build/esp32-s3-devkitc-1/firmware.bin
+```
+
+3. Create a GitHub Release and upload the `firmware.bin` asset.
+  - Tag should be `vMAJOR.MINOR.PATCH` (example: `v1.2.3`).
+  - Asset name can be anything as long as it ends with `.bin`.
+
+4. On the device, open Settings -> Firmware Update and tap “Check for update”.
+5. If an update is available, tap “Install vX.Y.Z”.
+
+## Data Sources
+
+- Kraken REST ticker provides prices and 24h change.
+- CoinGecko provides percent sync (1h/24h/7d/30d/1y) and full fallback when Kraken is missing or fails.
+- Dynamic Kraken pair mapping from AssetPairs for non-static symbols.
 
 ## Hardware Notes
 
 - I2C uses GPIO15 (SDA) and GPIO16 (SCL).
 - Touch controller is GT911-class on address `0x5D` with INT on GPIO1.
-- Brightness, speaker enable, and buzzer are controlled by the V1.3 control MCU at `0x30`.
+- Brightness and buzzer controlled by the V1.3 control MCU at `0x30`.
 - V1.3 control MCU commands:
-	- Brightness: 0 = max, 244 = min, 245 = off.
-	- Buzzer: 246 = on, 247 = off.
+  - Brightness: 0 = max, 244 = min, 245 = off.
+  - Buzzer: 246 = on, 247 = off.
 
 ## Display + Touch (Working Configuration)
 
@@ -39,15 +118,15 @@ This project uses the ESP-IDF RGB panel driver with a tuned timing profile for t
 ### Display
 - Panel: 800x480, RGB interface (`esp_lcd_panel_rgb`).
 - Pixel clock: 16 MHz with PLL240M source.
-- Bounce buffer: enabled (10 * H_RES) to avoid rolling.
+- Timing: HSYNC 4/40/40, VSYNC 10/30/1, `pclk_active_neg=1`.
+- Bounce buffer enabled (10 * H_RES).
 - LVGL vertical compensation: `ver_res = 480 + 40`, `offset_y = -40`.
 
 ### Touch
 - Driver: `esp_lcd_touch` + `esp_lcd_touch_gt911` (vendored under `components/`).
 - I2C address: 0x5D, INT: GPIO1.
-- INT wake pulse applied before touch init to bring the controller online.
-- Register address byte swap: disabled for the `esp_lcd_panel_io_i2c` path.
-- Touch mapping uses separate physical vs. LVGL target heights to handle the LVGL vertical offset.
+- INT wake pulse applied before touch init.
+- Register address byte swap disabled for `esp_lcd_panel_io_i2c`.
 
 ### Calibration Flags (platformio.ini)
 - `CT_TOUCH_CAL_X_MIN`, `CT_TOUCH_CAL_X_MAX`
@@ -57,10 +136,3 @@ This project uses the ESP-IDF RGB panel driver with a tuned timing profile for t
 - `CT_TOUCH_TARGET_V_RES=520`
 
 If touch feels vertically stretched, adjust `CT_TOUCH_CAL_Y_MAX` by small increments. If the entire touch map is shifted, adjust `CT_TOUCH_OFFSET_Y`.
-
-## TODO
-
-- Replace RGB panel pin mapping and timing constants in `display_driver.h`.
-- Implement GT911 touch driver and optional reset GPIO.
-- Complete WiFi manager, CoinGecko client, NVS persistence, and alert handling.
-- Build the remaining UI screens (watchlist, coin detail, add coin, alerts).
