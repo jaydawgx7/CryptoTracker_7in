@@ -39,21 +39,21 @@ pio device monitor -b 115200
 
 ## Screenshots
 
-<table cellpadding="12">
+<table width="100%" cellpadding="12">
   <tr>
-    <td><img src="Screenshots/Dashboard.png" alt="Dashboard" width="100%" /></td>
-    <td><img src="Screenshots/CoinWatch.png" alt="CoinWatch" width="100%" /></td>
+    <td><img src="Screenshots/Dashboard.png" alt="Dashboard" width="120%" /></td>
+    <td><img src="Screenshots/CoinWatch.png" alt="CoinWatch" width="120%" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/Crypto_Detail.png" alt="Coin Detail" width="100%" /></td>
-    <td><img src="Screenshots/Add_Coin.png" alt="Add Coin" width="100%" /></td>
+    <td><img src="Screenshots/Crypto_Detail.png" alt="Coin Detail" width="120%" /></td>
+    <td><img src="Screenshots/Add_Coin.png" alt="Add Coin" width="120%" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/Settings.png" alt="Settings" width="100%" /></td>
-    <td><img src="Screenshots/Theme_Settings.png" alt="Theme Settings" width="100%" /></td>
+    <td><img src="Screenshots/Settings.png" alt="Settings" width="120%" /></td>
+    <td><img src="Screenshots/Theme_Settings.png" alt="Theme Settings" width="120%" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/Purple_Theme.png" alt="Purple Theme" width="100%" /></td>
+    <td><img src="Screenshots/Purple_Theme.png" alt="Purple Theme" width="120%" /></td>
     <td></td>
   </tr>
 </table>
