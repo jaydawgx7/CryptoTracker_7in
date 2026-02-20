@@ -4,8 +4,10 @@
 #include "ui/ui_add_coin.h"
 #include "ui/ui_alerts.h"
 #include "ui/ui_coin_detail.h"
+#include "ui/ui_dashboard.h"
 #include "ui/ui_home.h"
 #include "ui/ui_settings.h"
+#include "ui/ui_touch_cal.h"
 #include "ui/ui_theme.h"
 #include "services/touch_driver.h"
 
@@ -24,10 +26,12 @@
 #define CT_UI_TOUCH_DOT_RADIUS 10
 
 static lv_obj_t *s_home_screen = NULL;
+static lv_obj_t *s_dashboard_screen = NULL;
 static lv_obj_t *s_settings_screen = NULL;
 static lv_obj_t *s_add_coin_screen = NULL;
 static lv_obj_t *s_alerts_screen = NULL;
 static lv_obj_t *s_coin_detail_screen = NULL;
+static lv_obj_t *s_touch_cal_screen = NULL;
 static const app_state_t *s_app_state = NULL;
 static bool s_theme_rebuild_pending = false;
 #if CT_UI_TOUCH_DEBUG
@@ -50,32 +54,56 @@ static void apply_state_to_screens(const app_state_t *state)
     }
 
     ui_home_set_state(state);
+    ui_dashboard_set_state(state);
     ui_add_coin_set_state((app_state_t *)state);
     ui_coin_detail_set_state((app_state_t *)state);
     ui_settings_set_state((app_state_t *)state);
+}
+
+static void delete_screen_if_inactive(lv_obj_t *screen, lv_obj_t *active)
+{
+    if (!screen || screen == active) {
+        return;
+    }
+    if (lv_obj_is_valid(screen)) {
+        lv_obj_del(screen);
+    }
 }
 
 static void rebuild_screens(void)
 {
     lv_obj_t *active_old = lv_scr_act();
     lv_obj_t *old_home = s_home_screen;
+    lv_obj_t *old_dashboard = s_dashboard_screen;
     lv_obj_t *old_settings = s_settings_screen;
     lv_obj_t *old_add = s_add_coin_screen;
     lv_obj_t *old_alerts = s_alerts_screen;
     lv_obj_t *old_detail = s_coin_detail_screen;
+    lv_obj_t *old_touch_cal = s_touch_cal_screen;
 
-    bool show_home = (active_old == old_home);
+    bool show_dashboard = (active_old == old_dashboard);
     bool show_settings = (active_old == old_settings);
     bool show_add = (active_old == old_add);
     bool show_alerts = (active_old == old_alerts);
     bool show_detail = (active_old == old_detail);
+    bool show_touch_cal = (active_old == old_touch_cal);
+
+    delete_screen_if_inactive(old_home, active_old);
+    delete_screen_if_inactive(old_dashboard, active_old);
+    delete_screen_if_inactive(old_settings, active_old);
+    delete_screen_if_inactive(old_add, active_old);
+    delete_screen_if_inactive(old_alerts, active_old);
+    delete_screen_if_inactive(old_detail, active_old);
+    delete_screen_if_inactive(old_touch_cal, active_old);
 
     s_home_screen = ui_home_screen_create();
+    s_dashboard_screen = ui_dashboard_screen_create();
 #if !CT_UI_MINIMAL
     s_settings_screen = ui_settings_screen_create();
     s_add_coin_screen = ui_add_coin_screen_create();
     s_alerts_screen = ui_alerts_screen_create();
     s_coin_detail_screen = ui_coin_detail_screen_create();
+    s_touch_cal_screen = ui_touch_cal_screen_create();
 #endif
 
 #if CT_UI_BORDER_DEBUG
@@ -88,7 +116,10 @@ static void rebuild_screens(void)
 
     apply_state_to_screens(s_app_state);
 
-    if (show_settings && s_settings_screen) {
+    if (show_dashboard && s_dashboard_screen) {
+        load_screen(s_dashboard_screen);
+        ui_dashboard_refresh();
+    } else if (show_settings && s_settings_screen) {
         load_screen(s_settings_screen);
     } else if (show_add && s_add_coin_screen) {
         load_screen(s_add_coin_screen);
@@ -97,25 +128,15 @@ static void rebuild_screens(void)
         ui_alerts_refresh();
     } else if (show_detail && s_coin_detail_screen) {
         load_screen(s_coin_detail_screen);
+    } else if (show_touch_cal && s_touch_cal_screen) {
+        load_screen(s_touch_cal_screen);
     } else {
         load_screen(s_home_screen);
         ui_home_refresh();
     }
 
-    if (old_home) {
-        lv_obj_del_async(old_home);
-    }
-    if (old_settings) {
-        lv_obj_del_async(old_settings);
-    }
-    if (old_add) {
-        lv_obj_del_async(old_add);
-    }
-    if (old_alerts) {
-        lv_obj_del_async(old_alerts);
-    }
-    if (old_detail) {
-        lv_obj_del_async(old_detail);
+    if (active_old && lv_obj_is_valid(active_old)) {
+        lv_obj_del(active_old);
     }
 }
 
@@ -208,11 +229,13 @@ void ui_init(void)
     ui_theme_init(true);
 
     s_home_screen = ui_home_screen_create();
+    s_dashboard_screen = ui_dashboard_screen_create();
 #if !CT_UI_MINIMAL
     s_settings_screen = ui_settings_screen_create();
     s_add_coin_screen = ui_add_coin_screen_create();
     s_alerts_screen = ui_alerts_screen_create();
     s_coin_detail_screen = ui_coin_detail_screen_create();
+    s_touch_cal_screen = ui_touch_cal_screen_create();
 #endif
 
 #if CT_UI_BORDER_DEBUG
@@ -221,9 +244,11 @@ void ui_init(void)
     apply_screen_border(s_add_coin_screen);
     apply_screen_border(s_alerts_screen);
     apply_screen_border(s_coin_detail_screen);
+    apply_screen_border(s_touch_cal_screen);
 #endif
 
-    load_screen(s_home_screen);
+    load_screen(s_dashboard_screen ? s_dashboard_screen : s_home_screen);
+    ui_dashboard_refresh();
 
 #if CT_UI_TOUCH_DEBUG
     touch_debug_init();
@@ -241,6 +266,15 @@ void ui_show_home(void)
     ui_home_refresh();
 }
 
+void ui_show_dashboard(void)
+{
+    rebuild_if_pending();
+    if (s_dashboard_screen) {
+        load_screen(s_dashboard_screen);
+        ui_dashboard_refresh();
+    }
+}
+
 void ui_set_app_state(const app_state_t *state)
 {
     if (!display_driver_lock(500)) {
@@ -251,10 +285,19 @@ void ui_set_app_state(const app_state_t *state)
 
     ui_theme_set_accent(state->prefs.accent_hex);
     ui_theme_set_shadow_color(state->prefs.shadow_hex);
+    ui_theme_set_shadow_strength((uint8_t)state->prefs.button_shadow_strength);
     ui_theme_set_dark_mode(state->prefs.dark_mode);
     ui_theme_init(state->prefs.dark_mode);
 
-    rebuild_screens();
+    apply_state_to_screens(s_app_state);
+
+    if (lv_scr_act() == s_dashboard_screen) {
+        ui_dashboard_refresh();
+    } else if (lv_scr_act() == s_home_screen) {
+        ui_home_refresh();
+    } else if (lv_scr_act() == s_alerts_screen) {
+        ui_alerts_refresh();
+    }
 
     display_driver_unlock();
 }
@@ -267,6 +310,7 @@ void ui_apply_theme(bool dark_mode)
     if (s_app_state) {
         ui_theme_set_accent(s_app_state->prefs.accent_hex);
         ui_theme_set_shadow_color(s_app_state->prefs.shadow_hex);
+        ui_theme_set_shadow_strength((uint8_t)s_app_state->prefs.button_shadow_strength);
     }
     ui_theme_init(dark_mode);
 
@@ -308,4 +352,13 @@ void ui_show_settings(void)
 {
     rebuild_if_pending();
     load_screen(s_settings_screen);
+}
+
+void ui_show_touch_calibration(void)
+{
+    rebuild_if_pending();
+    if (!s_touch_cal_screen) {
+        s_touch_cal_screen = ui_touch_cal_screen_create();
+    }
+    load_screen(s_touch_cal_screen);
 }

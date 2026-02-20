@@ -7,6 +7,7 @@
 #include "esp_lcd_touch_gt911.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -28,6 +29,91 @@ static int64_t s_last_read_us = 0;
 static esp_lcd_panel_io_handle_t s_touch_io = NULL;
 static esp_lcd_touch_handle_t s_touch = NULL;
 static esp_lcd_touch_io_gt911_config_t s_gt911_cfg = {0};
+static lv_point_t s_raw_point = {0};
+
+static touch_calibration_t s_default_calibration = {
+    .cal_x_min = CT_TOUCH_CAL_X_MIN,
+    .cal_x_max = CT_TOUCH_CAL_X_MAX,
+    .cal_y_min = CT_TOUCH_CAL_Y_MIN,
+    .cal_y_max = CT_TOUCH_CAL_Y_MAX,
+    .offset_x = CT_TOUCH_OFFSET_X,
+    .offset_y = CT_TOUCH_OFFSET_Y,
+};
+
+static touch_calibration_t s_runtime_calibration = {
+    .cal_x_min = CT_TOUCH_CAL_X_MIN,
+    .cal_x_max = CT_TOUCH_CAL_X_MAX,
+    .cal_y_min = CT_TOUCH_CAL_Y_MIN,
+    .cal_y_max = CT_TOUCH_CAL_Y_MAX,
+    .offset_x = CT_TOUCH_OFFSET_X,
+    .offset_y = CT_TOUCH_OFFSET_Y,
+};
+
+#define NVS_NAMESPACE "ct"
+#define NVS_KEY_TOUCH_VALID "touch_cal_valid"
+#define NVS_KEY_TOUCH_X_MIN "touch_cal_xmin"
+#define NVS_KEY_TOUCH_X_MAX "touch_cal_xmax"
+#define NVS_KEY_TOUCH_Y_MIN "touch_cal_ymin"
+#define NVS_KEY_TOUCH_Y_MAX "touch_cal_ymax"
+#define NVS_KEY_TOUCH_OFS_X "touch_ofs_x"
+#define NVS_KEY_TOUCH_OFS_Y "touch_ofs_y"
+
+#define NVS_KEY_DEF_VALID "touch_def_valid"
+#define NVS_KEY_DEF_X_MIN "touch_def_xmin"
+#define NVS_KEY_DEF_X_MAX "touch_def_xmax"
+#define NVS_KEY_DEF_Y_MIN "touch_def_ymin"
+#define NVS_KEY_DEF_Y_MAX "touch_def_ymax"
+#define NVS_KEY_DEF_OFS_X "touch_def_ofsx"
+#define NVS_KEY_DEF_OFS_Y "touch_def_ofsy"
+
+static bool touch_calibration_is_valid(const touch_calibration_t *cal)
+{
+    if (!cal) {
+        return false;
+    }
+
+    int32_t span_x = cal->cal_x_max - cal->cal_x_min;
+    int32_t span_y = cal->cal_y_max - cal->cal_y_min;
+
+    if (span_x <= 0 || span_y <= 0) {
+        return false;
+    }
+
+    if (span_x < 20 || span_y < 20) {
+        return false;
+    }
+
+    const int32_t phys_w = CT_TOUCH_PHYS_H_RES;
+    const int32_t phys_h = CT_TOUCH_PHYS_V_RES;
+
+    const int32_t min_span_x = (phys_w * 45) / 100;
+    const int32_t max_span_x = (phys_w * 160) / 100;
+    const int32_t min_span_y = (phys_h * 45) / 100;
+    const int32_t max_span_y = (phys_h * 160) / 100;
+
+    if (span_x < min_span_x || span_x > max_span_x || span_y < min_span_y || span_y > max_span_y) {
+        return false;
+    }
+
+    if (cal->cal_x_min < -phys_w || cal->cal_x_min > phys_w ||
+        cal->cal_x_max < 0 || cal->cal_x_max > (phys_w * 2) ||
+        cal->cal_y_min < -phys_h || cal->cal_y_min > phys_h ||
+        cal->cal_y_max < 0 || cal->cal_y_max > (phys_h * 2)) {
+        return false;
+    }
+
+    if (cal->offset_x < -120 || cal->offset_x > 120 ||
+        cal->offset_y < -120 || cal->offset_y > 120) {
+        return false;
+    }
+
+    return true;
+}
+
+static esp_err_t touch_open_nvs(nvs_handle_t *handle)
+{
+    return nvs_open(NVS_NAMESPACE, NVS_READWRITE, handle);
+}
 
 static void apply_transform(uint16_t *x, uint16_t *y)
 {
@@ -45,15 +131,17 @@ static void apply_transform(uint16_t *x, uint16_t *y)
         ty = (ty * (phys_v - 1)) / (s_touch_max_y - 1);
     }
 
-    if (CT_TOUCH_CAL_X_MAX > CT_TOUCH_CAL_X_MIN) {
-        tx = (tx - CT_TOUCH_CAL_X_MIN) * (phys_h - 1) / (CT_TOUCH_CAL_X_MAX - CT_TOUCH_CAL_X_MIN);
+    if (s_runtime_calibration.cal_x_max > s_runtime_calibration.cal_x_min) {
+        tx = (tx - s_runtime_calibration.cal_x_min) * (phys_h - 1) /
+             (s_runtime_calibration.cal_x_max - s_runtime_calibration.cal_x_min);
     }
-    if (CT_TOUCH_CAL_Y_MAX > CT_TOUCH_CAL_Y_MIN) {
-        ty = (ty - CT_TOUCH_CAL_Y_MIN) * (phys_v - 1) / (CT_TOUCH_CAL_Y_MAX - CT_TOUCH_CAL_Y_MIN);
+    if (s_runtime_calibration.cal_y_max > s_runtime_calibration.cal_y_min) {
+        ty = (ty - s_runtime_calibration.cal_y_min) * (phys_v - 1) /
+             (s_runtime_calibration.cal_y_max - s_runtime_calibration.cal_y_min);
     }
 
-    tx += CT_TOUCH_OFFSET_X;
-    ty += CT_TOUCH_OFFSET_Y;
+    tx += s_runtime_calibration.offset_x;
+    ty += s_runtime_calibration.offset_y;
 
     if (tx < 0) {
         tx = 0;
@@ -80,8 +168,216 @@ static void touch_process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, ui
     (void)max_point_num;
 
     for (uint8_t i = 0; i < *point_num; i++) {
+        if (i == 0) {
+            s_raw_point.x = (lv_coord_t)x[i];
+            s_raw_point.y = (lv_coord_t)y[i];
+        }
         apply_transform(&x[i], &y[i]);
     }
+}
+
+esp_err_t touch_driver_load_calibration(bool *loaded)
+{
+    if (loaded) {
+        *loaded = false;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = touch_open_nvs(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t valid = 0;
+    err = nvs_get_u8(handle, NVS_KEY_TOUCH_VALID, &valid);
+    if (err != ESP_OK || valid == 0) {
+        nvs_close(handle);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    touch_calibration_t cal = s_runtime_calibration;
+    if ((err = nvs_get_i32(handle, NVS_KEY_TOUCH_X_MIN, &cal.cal_x_min)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_TOUCH_X_MAX, &cal.cal_x_max)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_TOUCH_Y_MIN, &cal.cal_y_min)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_TOUCH_Y_MAX, &cal.cal_y_max)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_TOUCH_OFS_X, &cal.offset_x)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_TOUCH_OFS_Y, &cal.offset_y)) != ESP_OK) {
+        nvs_close(handle);
+        return err;
+    }
+
+    nvs_close(handle);
+    if (!touch_calibration_is_valid(&cal)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    s_runtime_calibration = cal;
+    if (loaded) {
+        *loaded = true;
+    }
+    ESP_LOGI(TAG, "Touch calibration loaded: x[%ld..%ld] y[%ld..%ld] ofs(%ld,%ld)",
+             (long)cal.cal_x_min, (long)cal.cal_x_max,
+             (long)cal.cal_y_min, (long)cal.cal_y_max,
+             (long)cal.offset_x, (long)cal.offset_y);
+    return ESP_OK;
+}
+
+esp_err_t touch_driver_save_calibration(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = touch_open_nvs(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const touch_calibration_t *cal = &s_runtime_calibration;
+    err = nvs_set_i32(handle, NVS_KEY_TOUCH_X_MIN, cal->cal_x_min);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_TOUCH_X_MAX, cal->cal_x_max);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_TOUCH_Y_MIN, cal->cal_y_min);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_TOUCH_Y_MAX, cal->cal_y_max);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_TOUCH_OFS_X, cal->offset_x);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_TOUCH_OFS_Y, cal->offset_y);
+    if (err == ESP_OK) err = nvs_set_u8(handle, NVS_KEY_TOUCH_VALID, 1);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+
+    return err;
+}
+
+esp_err_t touch_driver_set_default_calibration(const touch_calibration_t *calibration)
+{
+    if (!touch_calibration_is_valid(calibration)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_default_calibration = *calibration;
+    return ESP_OK;
+}
+
+esp_err_t touch_driver_save_default_calibration(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = touch_open_nvs(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const touch_calibration_t *cal = &s_default_calibration;
+    err = nvs_set_i32(handle, NVS_KEY_DEF_X_MIN, cal->cal_x_min);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_DEF_X_MAX, cal->cal_x_max);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_DEF_Y_MIN, cal->cal_y_min);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_DEF_Y_MAX, cal->cal_y_max);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_DEF_OFS_X, cal->offset_x);
+    if (err == ESP_OK) err = nvs_set_i32(handle, NVS_KEY_DEF_OFS_Y, cal->offset_y);
+    if (err == ESP_OK) err = nvs_set_u8(handle, NVS_KEY_DEF_VALID, 1);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+
+    return err;
+}
+
+esp_err_t touch_driver_promote_current_to_default(void)
+{
+    s_default_calibration = s_runtime_calibration;
+    if (!touch_calibration_is_valid(&s_default_calibration)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return touch_driver_save_default_calibration();
+}
+
+static esp_err_t touch_driver_load_default_calibration(bool *loaded)
+{
+    if (loaded) {
+        *loaded = false;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = touch_open_nvs(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t valid = 0;
+    err = nvs_get_u8(handle, NVS_KEY_DEF_VALID, &valid);
+    if (err != ESP_OK || valid == 0) {
+        nvs_close(handle);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    touch_calibration_t cal = s_default_calibration;
+    if ((err = nvs_get_i32(handle, NVS_KEY_DEF_X_MIN, &cal.cal_x_min)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_DEF_X_MAX, &cal.cal_x_max)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_DEF_Y_MIN, &cal.cal_y_min)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_DEF_Y_MAX, &cal.cal_y_max)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_DEF_OFS_X, &cal.offset_x)) != ESP_OK ||
+        (err = nvs_get_i32(handle, NVS_KEY_DEF_OFS_Y, &cal.offset_y)) != ESP_OK) {
+        nvs_close(handle);
+        return err;
+    }
+
+    nvs_close(handle);
+
+    if (!touch_calibration_is_valid(&cal)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    s_default_calibration = cal;
+    if (loaded) {
+        *loaded = true;
+    }
+
+    ESP_LOGI(TAG, "Touch default calibration loaded: x[%ld..%ld] y[%ld..%ld] ofs(%ld,%ld)",
+             (long)cal.cal_x_min, (long)cal.cal_x_max,
+             (long)cal.cal_y_min, (long)cal.cal_y_max,
+             (long)cal.offset_x, (long)cal.offset_y);
+    return ESP_OK;
+}
+
+esp_err_t touch_driver_discard_calibration(void)
+{
+    touch_driver_reset_calibration_defaults();
+
+    nvs_handle_t handle;
+    esp_err_t err = touch_open_nvs(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_u8(handle, NVS_KEY_TOUCH_VALID, 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+void touch_driver_get_calibration(touch_calibration_t *out)
+{
+    if (!out) {
+        return;
+    }
+    *out = s_runtime_calibration;
+}
+
+void touch_driver_get_default_calibration(touch_calibration_t *out)
+{
+    if (!out) {
+        return;
+    }
+    *out = s_default_calibration;
+}
+
+esp_err_t touch_driver_set_calibration(const touch_calibration_t *calibration)
+{
+    if (!touch_calibration_is_valid(calibration)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_runtime_calibration = *calibration;
+    return ESP_OK;
+}
+
+void touch_driver_reset_calibration_defaults(void)
+{
+    s_runtime_calibration = s_default_calibration;
 }
 
 static void touch_int_wakeup_pulse(void)
@@ -170,6 +466,19 @@ esp_err_t touch_driver_init(void)
     // Touch disabled by config
     return ESP_OK;
 #endif
+    bool defaults_loaded = false;
+    touch_driver_load_default_calibration(&defaults_loaded);
+
+    if (CT_TOUCH_FORCE_DEFAULTS) {
+        touch_driver_reset_calibration_defaults();
+    } else {
+        bool loaded = false;
+        touch_driver_load_calibration(&loaded);
+        if (!loaded) {
+            touch_driver_reset_calibration_defaults();
+        }
+    }
+
     // Touch config
     ESP_ERROR_CHECK(i2c_bus_init());
     control_mcu_touch_enable();
@@ -246,5 +555,18 @@ void touch_driver_get_state(bool *pressed, int16_t *x, int16_t *y)
     }
     if (y) {
         *y = (int16_t)s_point.y;
+    }
+}
+
+void touch_driver_get_raw_state(bool *pressed, int16_t *x, int16_t *y)
+{
+    if (pressed) {
+        *pressed = s_touched;
+    }
+    if (x) {
+        *x = (int16_t)s_raw_point.x;
+    }
+    if (y) {
+        *y = (int16_t)s_raw_point.y;
     }
 }

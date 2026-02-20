@@ -12,5 +12,7 @@ void ui_apply_theme(bool dark_mode);
 void ui_show_add_coin(void);
 void ui_show_alerts(void);
 void ui_show_coin_detail(size_t index);
+void ui_show_dashboard(void);
 void ui_show_home(void);
 void ui_show_settings(void);
+void ui_show_touch_calibration(void);

@@ -8,9 +8,11 @@
 
 #include "services/coingecko_client.h"
 #include "services/display_driver.h"
+#include "services/fng_service.h"
 #include "services/kraken_client.h"
 #include "services/wifi_manager.h"
 #include "services/alert_manager.h"
+#include "ui/ui_dashboard.h"
 #include "ui/ui_home.h"
 #include "ui/ui_alerts.h"
 
@@ -28,10 +30,11 @@ static int64_t s_last_chart_fetch_s = 0;
 #endif
 static int64_t s_last_market_fetch_s = 0;
 static int64_t s_last_coingecko_fetch_s = 0;
+static int64_t s_last_dashboard_metrics_fetch_s = 0;
 static int64_t s_rate_limit_until_s = 0;
 static int64_t s_last_ui_refresh_s = 0;
 static int64_t s_last_header_update_s = 0;
-static uint32_t s_min_interval_override_s = 0;
+static bool s_paused = false;
 static size_t s_last_watchlist_count = 0;
 static double s_last_prices[MAX_WATCHLIST] = {0};
 static double s_last_change_1h[MAX_WATCHLIST] = {0};
@@ -73,26 +76,11 @@ static bool market_data_changed(const app_state_t *state)
     return changed;
 }
 
-static uint32_t adaptive_base_seconds(size_t count)
-{
-    if (count <= 10) {
-        return 10;
-    }
-    if (count <= 30) {
-        return 15;
-    }
-    return 30;
-}
-
 static uint32_t clamp_refresh_seconds(uint32_t value, data_source_t source)
 {
+    (void)source;
     uint32_t min = 5;
-    uint32_t max = 60;
-
-    if (source == DATA_SOURCE_KRAKEN) {
-        min = 1;
-        max = 15;
-    }
+    uint32_t max = 120;
 
     if (value < min) {
         return min;
@@ -110,6 +98,11 @@ static void refresh_task(void *arg)
     int64_t last_success = 0;
 
     while (true) {
+        if (s_paused) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
         if (!s_state || s_state->watchlist_count == 0) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
@@ -117,17 +110,8 @@ static void refresh_task(void *arg)
 
         data_source_t source = s_state->prefs.data_source;
         uint32_t user_pref = clamp_refresh_seconds(s_state->prefs.refresh_seconds, source);
-        uint32_t adaptive = adaptive_base_seconds(s_state->watchlist_count);
-        uint32_t base = (source == DATA_SOURCE_KRAKEN) ? user_pref : (user_pref > adaptive ? user_pref : adaptive);
-
+        uint32_t base = user_pref;
         uint32_t delay_sec = base;
-        if (failures > 0) {
-            uint32_t backoff = base << (failures > 5 ? 5 : failures);
-            if (backoff > 300) {
-                backoff = 300;
-            }
-            delay_sec = backoff;
-        }
 
         wifi_state_t wifi_state = WIFI_STATE_DISCONNECTED;
         wifi_manager_get_state(&wifi_state, NULL);
@@ -136,9 +120,50 @@ static void refresh_task(void *arg)
             continue;
         }
 
+        char ip[16] = {0};
+        if (!wifi_manager_get_ip(ip, sizeof(ip))) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
         int64_t now_s = esp_timer_get_time() / 1000000;
         bool rate_limited_active = (s_rate_limit_until_s > 0 && now_s < s_rate_limit_until_s);
         bool fetched = false;
+
+        bool metrics_due = (s_last_dashboard_metrics_fetch_s == 0) ||
+                   ((now_s - s_last_dashboard_metrics_fetch_s) >= 3600);
+        if (metrics_due) {
+            (void)fng_service_refresh(3600);
+            s_last_dashboard_metrics_fetch_s = now_s;
+            if (display_driver_lock(200)) {
+                ui_dashboard_refresh();
+                display_driver_unlock();
+            }
+        }
+
+        if (s_state->watchlist_count == 0) {
+            for (uint32_t i = 0; i < delay_sec; i++) {
+                int64_t now = esp_timer_get_time();
+                int64_t now_loop_s = now / 1000000;
+                uint32_t age_s = last_success > 0 ? (uint32_t)((now - last_success) / 1000000) : 0;
+                bool rate_limited = (s_rate_limit_until_s > 0 && now < (s_rate_limit_until_s * 1000000LL));
+                bool offline = failures > 0 && !rate_limited;
+                wifi_state_t wifi_loop_state = WIFI_STATE_DISCONNECTED;
+                int rssi = 0;
+                wifi_manager_get_state(&wifi_loop_state, &rssi);
+
+                if (now_loop_s - s_last_header_update_s >= 2) {
+                    if (display_driver_lock(100)) {
+                        ui_home_update_header(wifi_loop_state, rssi, age_s, offline, rate_limited);
+                        display_driver_unlock();
+                    }
+                    s_last_header_update_s = now_loop_s;
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+            continue;
+        }
 
         if (source == DATA_SOURCE_KRAKEN) {
             bool any_missing = false;
@@ -191,9 +216,6 @@ static void refresh_task(void *arg)
             }
         } else {
             uint32_t min_interval = base;
-            if (s_min_interval_override_s > min_interval) {
-                min_interval = s_min_interval_override_s;
-            }
             bool can_fetch = !rate_limited_active;
             if (s_last_market_fetch_s > 0 && (now_s - s_last_market_fetch_s) < (int64_t)min_interval) {
                 can_fetch = false;
@@ -208,13 +230,6 @@ static void refresh_task(void *arg)
                     s_last_coingecko_fetch_s = now_s;
                     s_rate_limit_until_s = 0;
                     rate_limited_active = false;
-                    if (s_min_interval_override_s > 0) {
-                        if (s_min_interval_override_s > 25) {
-                            s_min_interval_override_s -= 5;
-                        } else {
-                            s_min_interval_override_s = 0;
-                        }
-                    }
                     fetched = true;
                 } else {
                     failures++;
@@ -224,14 +239,6 @@ static void refresh_task(void *arg)
                         }
                         s_rate_limit_until_s = now_s + 120;
                         rate_limited_active = true;
-                        if (s_min_interval_override_s == 0) {
-                            s_min_interval_override_s = 30;
-                        } else if (s_min_interval_override_s < 60) {
-                            s_min_interval_override_s = s_min_interval_override_s * 2;
-                            if (s_min_interval_override_s > 60) {
-                                s_min_interval_override_s = 60;
-                            }
-                        }
                         ESP_LOGW(TAG, "Rate limited: backing off for 120s");
                     }
                     ESP_LOGW(TAG, "Market refresh failed: %d", err);
@@ -244,6 +251,7 @@ static void refresh_task(void *arg)
             if (changed && (now_s - s_last_ui_refresh_s) >= 5) {
                 if (display_driver_lock(200)) {
                     ui_home_refresh();
+                    ui_dashboard_refresh();
                     display_driver_unlock();
                 }
                 s_last_ui_refresh_s = now_s;
@@ -251,6 +259,7 @@ static void refresh_task(void *arg)
             alert_manager_check();
             if (display_driver_lock(200)) {
                 ui_alerts_refresh();
+                ui_dashboard_refresh();
                 display_driver_unlock();
             }
         }
@@ -307,9 +316,16 @@ esp_err_t scheduler_init(app_state_t *state)
     return ESP_OK;
 #endif
     s_state = state;
+    s_last_dashboard_metrics_fetch_s = 0;
     if (!s_task) {
         xTaskCreate(refresh_task, "ct_refresh", 6144, NULL, 3, &s_task);
     }
     ESP_LOGI(TAG, "Scheduler started");
     return ESP_OK;
+}
+
+void scheduler_set_paused(bool paused)
+{
+    s_paused = paused;
+    ESP_LOGI(TAG, "Scheduler %s", paused ? "paused" : "resumed");
 }

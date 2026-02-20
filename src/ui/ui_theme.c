@@ -10,6 +10,7 @@ static lv_style_t s_button_shadow_style;
 static bool s_pressed_style_inited = false;
 static bool s_button_shadow_inited = false;
 static bool s_buttons_3d = true;
+static uint8_t s_shadow_strength = 2;
 
 static ui_theme_colors_t s_theme = {
     .accent = 0x00FE8F,
@@ -69,9 +70,23 @@ static void update_button_shadow_style(void)
     }
 
     if (s_buttons_3d) {
-        lv_style_set_shadow_width(&s_button_shadow_style, 10);
-        lv_style_set_shadow_ofs_y(&s_button_shadow_style, 4);
-        lv_style_set_shadow_opa(&s_button_shadow_style, LV_OPA_80);
+        int16_t width = 10;
+        int16_t ofs_y = 5;
+        lv_opa_t opa = LV_OPA_80;
+
+        if (s_shadow_strength == 0) {
+            width = 6;
+            ofs_y = 1;
+            opa = LV_OPA_80;
+        } else if (s_shadow_strength == 1) {
+            width = 8;
+            ofs_y = 3;
+            opa = LV_OPA_80;
+        }
+
+        lv_style_set_shadow_width(&s_button_shadow_style, width);
+        lv_style_set_shadow_ofs_y(&s_button_shadow_style, ofs_y);
+        lv_style_set_shadow_opa(&s_button_shadow_style, opa);
         lv_style_set_shadow_color(&s_button_shadow_style, lv_color_hex(s_theme.shadow_color));
     } else {
         lv_style_set_shadow_width(&s_button_shadow_style, 0);
@@ -142,6 +157,16 @@ void ui_theme_set_dark_mode(bool dark_mode)
 void ui_theme_set_buttons_3d(bool enabled)
 {
     s_buttons_3d = enabled;
+    update_button_shadow_style();
+    lv_obj_report_style_change(&s_button_shadow_style);
+}
+
+void ui_theme_set_shadow_strength(uint8_t level)
+{
+    if (level > 2) {
+        level = 2;
+    }
+    s_shadow_strength = level;
     update_button_shadow_style();
     lv_obj_report_style_change(&s_button_shadow_style);
 }

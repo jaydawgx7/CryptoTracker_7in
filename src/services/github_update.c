@@ -103,13 +103,18 @@ static bool parse_semver(const char *tag, int *major, int *minor, int *patch)
     p = end + 1;
 
     long m2 = strtol(p, &end, 10);
-    if (!end || *end != '.') {
+    if (!end) {
         return false;
     }
-    p = end + 1;
 
-    long m3 = strtol(p, &end, 10);
-    if (!end || (*end != '\0' && *end != '\n' && *end != '\r')) {
+    long m3 = 0;
+    if (*end == '.') {
+        p = end + 1;
+        m3 = strtol(p, &end, 10);
+        if (!end || (*end != '\0' && *end != '\n' && *end != '\r')) {
+            return false;
+        }
+    } else if (*end != '\0' && *end != '\n' && *end != '\r') {
         return false;
     }
 
@@ -226,10 +231,13 @@ static void github_check_task(void *arg)
     esp_http_client_set_header(client, "User-Agent", "CryptoTracker_7in");
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
 
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+
     esp_err_t err = esp_http_client_open(client, 0);
-    int http_status = esp_http_client_get_status_code(client);
+    int http_status = 0;
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
+        http_status = esp_http_client_get_status_code(client);
     }
 
     char *body = malloc(GITHUB_BODY_MAX);
@@ -244,6 +252,9 @@ static void github_check_task(void *arg)
 
     if (err == ESP_OK) {
         read_body(client, body, GITHUB_BODY_MAX);
+        if (http_status == 0) {
+            http_status = esp_http_client_get_status_code(client);
+        }
     }
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -336,10 +347,13 @@ static void github_check_task(void *arg)
     bool parsed = false;
     int cmp = semver_compare(tag_value, APP_VERSION, &parsed);
     bool newer = parsed ? (cmp > 0) : (strcmp(tag_value, APP_VERSION) != 0);
+    bool same = parsed ? (cmp == 0) : (strcmp(tag_value, APP_VERSION) == 0);
 
     set_status_fields(tag_value, url_buf, notes_buf, http_status, ESP_OK);
 
-    if (newer && url_buf[0] != '\0') {
+    if (same) {
+        set_status(GITHUB_UPDATE_UP_TO_DATE);
+    } else if (newer && url_buf[0] != '\0') {
         set_status(GITHUB_UPDATE_AVAILABLE);
     } else if (newer) {
         set_status(GITHUB_UPDATE_FAILED);

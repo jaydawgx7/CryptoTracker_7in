@@ -7,6 +7,9 @@ static void nav_event(lv_event_t *e)
 {
 	ui_nav_page_t page = (ui_nav_page_t)(uintptr_t)lv_event_get_user_data(e);
 	switch (page) {
+		case UI_NAV_DASHBOARD:
+			ui_show_dashboard();
+			break;
 		case UI_NAV_HOME:
 			ui_show_home();
 			break;
@@ -76,7 +79,8 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 
 	lv_obj_t *nav = lv_obj_create(screen);
 	lv_obj_set_size(nav, 800, 56);
-	lv_obj_align(nav, LV_ALIGN_TOP_MID, 0, -12);
+	lv_obj_align(nav, LV_ALIGN_TOP_MID, 0, -UI_NAV_HEIGHT);
+	lv_obj_move_foreground(nav);
 	lv_obj_set_style_bg_color(nav, lv_color_hex(nav_bg), 0);
 	lv_obj_set_style_border_width(nav, 0, 0);
 	lv_obj_set_style_pad_left(nav, 10, 0);
@@ -101,8 +105,8 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 			lv_obj_set_style_text_color(label, lv_color_hex(active_text), LV_STATE_PRESSED);
 		}
 	} else {
-		buttons[0] = create_nav_button(nav, home_text, UI_NAV_HOME, active_page == UI_NAV_HOME);
-		buttons[1] = create_nav_button(nav, "Add", UI_NAV_ADD, active_page == UI_NAV_ADD);
+		buttons[0] = create_nav_button(nav, "Dashboard", UI_NAV_DASHBOARD, active_page == UI_NAV_DASHBOARD);
+		buttons[1] = create_nav_button(nav, home_text, UI_NAV_HOME, active_page == UI_NAV_HOME);
 		buttons[2] = create_nav_button(nav, "Alerts", UI_NAV_ALERTS, active_page == UI_NAV_ALERTS);
 		buttons[3] = create_nav_button(nav, "Settings", UI_NAV_SETTINGS, active_page == UI_NAV_SETTINGS);
 	}
@@ -144,7 +148,7 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 
 void ui_nav_attach(lv_obj_t *screen, ui_nav_page_t active_page)
 {
-	ui_nav_attach_internal(screen, active_page, "Home", false);
+	ui_nav_attach_internal(screen, active_page, "CoinWatch", false);
 }
 
 void ui_nav_attach_with_home_label(lv_obj_t *screen, ui_nav_page_t active_page, const char *home_label)

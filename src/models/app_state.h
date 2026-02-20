@@ -22,6 +22,12 @@ typedef enum {
     DATA_SOURCE_KRAKEN
 } data_source_t;
 
+typedef enum {
+    BUTTON_SHADOW_MINIMAL = 0,
+    BUTTON_SHADOW_MEDIUM = 1,
+    BUTTON_SHADOW_MAXIMUM = 2
+} button_shadow_strength_t;
+
 typedef struct {
     bool dark_mode;
     bool buttons_3d;
@@ -33,7 +39,9 @@ typedef struct {
     bool buzzer_enabled;
     uint32_t accent_hex;
     uint32_t shadow_hex;
+    button_shadow_strength_t button_shadow_strength;
     data_source_t data_source;
+    bool demo_portfolio;
 } ui_prefs_t;
 
 typedef struct {

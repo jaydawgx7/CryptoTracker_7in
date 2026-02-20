@@ -44,6 +44,8 @@ static lv_timer_t *s_toast_timer = NULL;
 static lv_obj_t *s_add_btn = NULL;
 static lv_obj_t *s_add_label = NULL;
 static lv_obj_t *s_values_checkbox = NULL;
+static lv_obj_t *s_values_eye_label = NULL;
+static lv_obj_t *s_demo_footer_label = NULL;
 static size_t s_active_index = 0;
 static bool s_ignore_click = false;
 static lv_obj_t *s_keyboard = NULL;
@@ -56,7 +58,6 @@ static esp_err_t s_buzzer_last_err = ESP_OK;
 static lv_obj_t *s_sort_buttons[6] = {0};
 static lv_obj_t *s_sort_labels[6] = {0};
 static lv_obj_t *s_holdings_pill = NULL;
-static lv_obj_t *s_refresh_pill_label = NULL;
 static sort_field_t s_sort_field = SORT_SYMBOL;
 static bool s_sort_desc = false;
 static lv_obj_t *s_screen = NULL;
@@ -150,6 +151,8 @@ static lv_color_t color_neg = {0};
 static lv_color_t color_neutral = {0};
 static lv_color_t color_stale = {0};
 static bool s_offline = false;
+static bool s_list_scroll_active = false;
+static int64_t s_list_scroll_holdoff_until_ms = 0;
 
 static void show_holdings_modal(size_t index);
 static void show_alerts_modal(size_t index);
@@ -168,7 +171,8 @@ static void buzzer_slider_event(lv_event_t *e);
 static void buzzer_test_event(lv_event_t *e);
 static void buzzer_result_cb(void *arg);
 static void buzzer_task(void *arg);
-static void update_refresh_pill(void);
+static void update_values_toggle_icon(void);
+static void table_scroll_event(lv_event_t *e);
 
 static void style_modal_button(lv_obj_t *btn)
 {
@@ -336,15 +340,13 @@ static void values_toggle_event(lv_event_t *e)
     }
 
     app_state_t *state = (app_state_t *)s_state;
-    bool checked = lv_obj_has_state(s_values_checkbox, LV_STATE_CHECKED);
-    if (checked == state->prefs.show_values) {
-        if (checked) {
-            lv_obj_clear_state(s_values_checkbox, LV_STATE_CHECKED);
-        } else {
-            lv_obj_add_state(s_values_checkbox, LV_STATE_CHECKED);
-        }
+    state->prefs.show_values = !state->prefs.show_values;
+    if (state->prefs.show_values) {
+        lv_obj_add_state(s_values_checkbox, LV_STATE_CHECKED);
+    } else {
+        lv_obj_clear_state(s_values_checkbox, LV_STATE_CHECKED);
     }
-    state->prefs.show_values = lv_obj_has_state(s_values_checkbox, LV_STATE_CHECKED);
+    update_values_toggle_icon();
     persist_state();
     ui_home_update_header(s_last_wifi_state, s_last_rssi, s_last_updated_age, s_offline, s_last_rate_limited);
     ui_home_refresh();
@@ -1051,7 +1053,14 @@ static lv_color_t percent_color(double change)
 
 static lv_obj_t *create_cell(lv_obj_t *parent, const char *text, lv_coord_t width, lv_color_t color, lv_text_align_t align)
 {
+    if (!parent || !lv_obj_is_valid(parent)) {
+        return NULL;
+    }
+
     lv_obj_t *label = lv_label_create(parent);
+    if (!label) {
+        return NULL;
+    }
     lv_label_set_text(label, text);
     lv_obj_set_width(label, width);
     lv_obj_set_style_text_color(label, color, 0);
@@ -1117,6 +1126,10 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
         return;
     }
 
+    if (!s_table_body || !lv_obj_is_valid(s_table_body)) {
+        return;
+    }
+
     if (row->row && !lv_obj_is_valid(row->row)) {
         if (row->flash_timer) {
             lv_timer_del(row->flash_timer);
@@ -1150,6 +1163,9 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
 
     if (!row->row) {
         row->row = lv_obj_create(s_table_body);
+        if (!row->row) {
+            return;
+        }
         lv_obj_set_size(row->row, 780, 40);
         lv_obj_set_style_border_width(row->row, 0, 0);
         lv_obj_set_style_radius(row->row, 0, 0);
@@ -1171,6 +1187,13 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
         row->label_7d = create_cell(row->row, "", s_col_widths[4], color_neutral, LV_TEXT_ALIGN_RIGHT);
         row->label_hold = create_cell(row->row, "", s_col_widths[5], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_RIGHT);
         row->label_value = create_cell(row->row, "", s_col_widths[6], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_RIGHT);
+
+        if (!row->label_symbol || !row->label_price || !row->label_1h || !row->label_24h || !row->label_7d ||
+            !row->label_hold || !row->label_value) {
+            lv_obj_del(row->row);
+            row->row = NULL;
+            return;
+        }
 
         row->coin_index = SIZE_MAX;
         row->last_display_index = -1;
@@ -1458,31 +1481,58 @@ static int compare_coins(const coin_t *a, const coin_t *b)
     return 0;
 }
 
+static int compare_coin_indices(const void *lhs, const void *rhs)
+{
+    size_t idx_l = *(const size_t *)lhs;
+    size_t idx_r = *(const size_t *)rhs;
+    const coin_t *a = &s_state->watchlist[idx_l];
+    const coin_t *b = &s_state->watchlist[idx_r];
+    return compare_coins(a, b);
+}
+
 static void sort_indices(size_t *indices, size_t count)
 {
-    for (size_t i = 0; i < count; i++) {
-        for (size_t j = i + 1; j < count; j++) {
-            const coin_t *a = &s_state->watchlist[indices[i]];
-            const coin_t *b = &s_state->watchlist[indices[j]];
-            if (compare_coins(a, b) > 0) {
-                size_t tmp = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp;
-            }
-        }
+    if (!s_state || count < 2) {
+        return;
+    }
+
+    qsort(indices, count, sizeof(size_t), compare_coin_indices);
+}
+
+static void table_scroll_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (code == LV_EVENT_SCROLL_BEGIN) {
+        s_list_scroll_active = true;
+        return;
+    }
+
+    if (code == LV_EVENT_SCROLL_END) {
+        s_list_scroll_active = false;
+        s_list_scroll_holdoff_until_ms = now_ms + 250;
     }
 }
 
 static void update_sort_buttons(void)
 {
+    const ui_theme_colors_t *theme = ui_theme_get();
+    uint32_t accent = theme ? theme->accent : HOME_MODAL_TEXT_COLOR;
+
     for (int i = 0; i < 6; i++) {
         if (!s_sort_buttons[i]) {
             continue;
         }
         bool active = (i == s_sort_field);
-        lv_obj_set_style_bg_color(s_sort_buttons[i], active ? lv_color_hex(0x424242) : lv_color_hex(HOME_MODAL_BTN_BG), 0);
-        lv_obj_set_style_text_color(s_sort_buttons[i], active ? lv_color_hex(HOME_MODAL_TEXT_COLOR) : lv_color_hex(0xE6E6E6), 0);
+        lv_obj_set_style_bg_opa(s_sort_buttons[i], active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(s_sort_buttons[i], active ? lv_color_hex(0x30343D) : lv_color_hex(HOME_MODAL_BTN_BG), 0);
+        lv_obj_set_style_border_side(s_sort_buttons[i], LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(s_sort_buttons[i], active ? 2 : 0, 0);
+        lv_obj_set_style_border_color(s_sort_buttons[i], lv_color_hex(accent), 0);
+        lv_obj_set_style_text_color(s_sort_buttons[i], active ? lv_color_hex(accent) : lv_color_hex(0xD2D6DE), 0);
         if (s_sort_labels[i]) {
+            lv_obj_set_style_text_color(s_sort_labels[i], active ? lv_color_hex(accent) : lv_color_hex(0xD2D6DE), 0);
             char label[16];
             if (active) {
                 const char *arrow = s_sort_desc ? LV_SYMBOL_DOWN : LV_SYMBOL_UP;
@@ -1495,15 +1545,18 @@ static void update_sort_buttons(void)
     }
 }
 
-static void update_refresh_pill(void)
+static void update_values_toggle_icon(void)
 {
-    if (!s_refresh_pill_label || !s_state) {
+    if (!s_values_checkbox || !s_values_eye_label) {
         return;
     }
 
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%ds", (int)s_state->prefs.refresh_seconds);
-    lv_label_set_text(s_refresh_pill_label, buf);
+    bool show_values = s_state ? s_state->prefs.show_values : true;
+    const ui_theme_colors_t *theme = ui_theme_get();
+    uint32_t icon_color = show_values ? (theme ? theme->accent : 0x00FE8F) : 0x6B717B;
+
+    lv_label_set_text(s_values_eye_label, show_values ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+    lv_obj_set_style_text_color(s_values_eye_label, lv_color_hex(icon_color), 0);
 }
 
 static void sort_button_event(lv_event_t *e)
@@ -1541,33 +1594,57 @@ void ui_home_set_state(const app_state_t *state)
         } else {
             lv_obj_clear_state(s_values_checkbox, LV_STATE_CHECKED);
         }
+        update_values_toggle_icon();
     }
     update_sort_buttons();
-    update_refresh_pill();
     ui_home_refresh();
+}
+
+bool ui_home_open_holdings_editor(size_t index)
+{
+    if (!s_state || index >= s_state->watchlist_count) {
+        return false;
+    }
+
+    show_holdings_modal(index);
+    return true;
 }
 
 void ui_home_refresh(void)
 {
-    if (!s_screen || lv_scr_act() != s_screen) {
+    if (!s_screen || !lv_obj_is_valid(s_screen) || lv_scr_act() != s_screen) {
         return;
     }
-    if (!s_table_body) {
+    if (!s_table_body || !lv_obj_is_valid(s_table_body)) {
         return;
     }
 
-    if (lv_obj_is_scrolling(s_table_body)) {
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (s_list_scroll_active || lv_obj_is_scrolling(s_table_body)) {
+        s_list_scroll_holdoff_until_ms = now_ms + 250;
+        return;
+    }
+
+    if (now_ms < s_list_scroll_holdoff_until_ms) {
         return;
     }
 
     static int64_t s_last_refresh_ms = 0;
-    int64_t now_ms = esp_timer_get_time() / 1000;
     if (s_last_refresh_ms > 0 && (now_ms - s_last_refresh_ms) < 1000) {
         return;
     }
     s_last_refresh_ms = now_ms;
 
-    update_refresh_pill();
+    update_values_toggle_icon();
+
+    if (s_demo_footer_label) {
+        if (s_state && s_state->prefs.demo_portfolio) {
+            lv_obj_clear_flag(s_demo_footer_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_demo_footer_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     if (!s_state || s_state->watchlist_count == 0) {
         if (s_empty_label) {
@@ -1641,20 +1718,16 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, -56, 15);
 
-    const ui_theme_colors_t *theme = ui_theme_get();
+    s_demo_footer_label = lv_label_create(footer);
+    lv_label_set_text(s_demo_footer_label, "Demo Portfolio Active");
+    lv_obj_set_style_text_color(s_demo_footer_label, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_set_style_text_font(s_demo_footer_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_demo_footer_label, LV_ALIGN_LEFT_MID, 10, 15);
+    lv_obj_add_flag(s_demo_footer_label, LV_OBJ_FLAG_HIDDEN);
 
-    s_values_checkbox = lv_checkbox_create(footer);
-    lv_checkbox_set_text(s_values_checkbox, "Show values");
-    lv_obj_set_style_text_color(s_values_checkbox, lv_color_hex(0x9AA1AD), 0);
-    lv_obj_align(s_values_checkbox, LV_ALIGN_LEFT_MID, 12, 15);
-    lv_obj_clear_flag(s_values_checkbox, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(s_values_checkbox, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(s_values_checkbox, values_toggle_event, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_style_bg_color(s_values_checkbox, lv_color_hex(theme ? theme->accent : 0x00FE8F), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_set_style_border_color(s_values_checkbox, lv_color_hex(theme ? theme->accent : 0x00FE8F), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    if (s_state && s_state->prefs.show_values) {
-        lv_obj_add_state(s_values_checkbox, LV_STATE_CHECKED);
-    }
+    const ui_theme_colors_t *theme = ui_theme_get();
+    s_values_checkbox = NULL;
+    s_values_eye_label = NULL;
 
     s_add_btn = lv_btn_create(footer);
     lv_obj_set_size(s_add_btn, 40, 40);
@@ -1673,14 +1746,15 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_center(s_add_label);
 
     lv_obj_t *sort_bar = lv_obj_create(screen);
-    lv_obj_set_size(sort_bar, 800, 34);
-    lv_obj_align(sort_bar, LV_ALIGN_TOP_LEFT, 0, 44);
+    lv_obj_set_size(sort_bar, 780, 34);
+    lv_obj_align(sort_bar, LV_ALIGN_TOP_LEFT, 10, 4);
     lv_obj_set_style_bg_color(sort_bar, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+    lv_obj_set_style_radius(sort_bar, 0, 0);
     lv_obj_set_style_border_width(sort_bar, 0, 0);
-    lv_obj_set_style_pad_left(sort_bar, 10, 0);
-    lv_obj_set_style_pad_right(sort_bar, 10, 0);
-    lv_obj_set_style_pad_top(sort_bar, 4, 0);
-    lv_obj_set_style_pad_bottom(sort_bar, 4, 0);
+    lv_obj_set_style_pad_left(sort_bar, 0, 0);
+    lv_obj_set_style_pad_right(sort_bar, 0, 0);
+    lv_obj_set_style_pad_top(sort_bar, 0, 0);
+    lv_obj_set_style_pad_bottom(sort_bar, 0, 0);
     lv_obj_set_flex_flow(sort_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(sort_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(sort_bar, 6, 0);
@@ -1689,9 +1763,12 @@ lv_obj_t *ui_home_screen_create(void)
 
     for (int i = 0; i < 5; i++) {
         lv_obj_t *btn = lv_btn_create(sort_bar);
-        lv_obj_set_size(btn, s_col_widths[i], 26);
-        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_size(btn, s_col_widths[i], 30);
+        lv_obj_set_style_radius(btn, 0, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, sort_button_event, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
         lv_obj_t *label = lv_label_create(btn);
@@ -1703,9 +1780,12 @@ lv_obj_t *ui_home_screen_create(void)
     }
 
     s_holdings_pill = lv_btn_create(sort_bar);
-    lv_obj_set_size(s_holdings_pill, s_col_widths[5], 26);
-    lv_obj_set_style_radius(s_holdings_pill, 6, 0);
+    lv_obj_set_size(s_holdings_pill, s_col_widths[5], 30);
+    lv_obj_set_style_radius(s_holdings_pill, 0, 0);
+    lv_obj_set_style_bg_opa(s_holdings_pill, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(s_holdings_pill, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+    lv_obj_set_style_border_width(s_holdings_pill, 0, 0);
+    lv_obj_set_style_shadow_width(s_holdings_pill, 0, 0);
     lv_obj_clear_flag(s_holdings_pill, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *hold_label = lv_label_create(s_holdings_pill);
@@ -1715,9 +1795,12 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_center(hold_label);
 
     lv_obj_t *value_btn = lv_btn_create(sort_bar);
-    lv_obj_set_size(value_btn, s_col_widths[6], 26);
-    lv_obj_set_style_radius(value_btn, 6, 0);
+    lv_obj_set_size(value_btn, s_col_widths[6], 30);
+    lv_obj_set_style_radius(value_btn, 0, 0);
+    lv_obj_set_style_bg_opa(value_btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(value_btn, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+    lv_obj_set_style_border_width(value_btn, 0, 0);
+    lv_obj_set_style_shadow_width(value_btn, 0, 0);
     lv_obj_add_event_cb(value_btn, sort_button_event, LV_EVENT_CLICKED, (void *)(uintptr_t)SORT_VALUE);
 
     lv_obj_t *value_label = lv_label_create(value_btn);
@@ -1727,24 +1810,43 @@ lv_obj_t *ui_home_screen_create(void)
     s_sort_buttons[SORT_VALUE] = value_btn;
     s_sort_labels[SORT_VALUE] = value_label;
 
-    lv_obj_t *refresh_pill = lv_obj_create(sort_bar);
-    lv_obj_set_size(refresh_pill, 54, 26);
-    lv_obj_set_style_radius(refresh_pill, 6, 0);
-    lv_obj_set_style_bg_color(refresh_pill, lv_color_hex(HOME_MODAL_BTN_BG), 0);
-    lv_obj_set_style_border_width(refresh_pill, 0, 0);
-    lv_obj_clear_flag(refresh_pill, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(refresh_pill, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(refresh_pill, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_t *spacer = lv_obj_create(sort_bar);
+    lv_obj_set_size(spacer, 1, 1);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spacer, 0, 0);
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(spacer, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_flex_grow(spacer, 1);
 
-    s_refresh_pill_label = lv_label_create(refresh_pill);
-    lv_label_set_text(s_refresh_pill_label, "10s");
-    lv_obj_set_style_text_font(s_refresh_pill_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_refresh_pill_label, lv_color_hex(0x6B717B), 0);
-    lv_obj_center(s_refresh_pill_label);
+    s_values_checkbox = lv_btn_create(sort_bar);
+    lv_obj_set_size(s_values_checkbox, 34, 30);
+    lv_obj_set_style_radius(s_values_checkbox, 0, 0);
+    lv_obj_set_style_bg_opa(s_values_checkbox, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_values_checkbox, lv_color_hex(HOME_MODAL_BTN_BG), 0);
+    lv_obj_set_style_bg_color(s_values_checkbox, lv_color_hex(HOME_MODAL_BTN_BG), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(s_values_checkbox, lv_color_hex(HOME_MODAL_BTN_BG), LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(s_values_checkbox, lv_color_hex(HOME_MODAL_BTN_BG), LV_STATE_CHECKED | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(s_values_checkbox, 0, 0);
+    lv_obj_set_style_shadow_width(s_values_checkbox, 0, 0);
+    lv_obj_clear_flag(s_values_checkbox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_values_checkbox, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_event_cb(s_values_checkbox, values_toggle_event, LV_EVENT_CLICKED, NULL);
+
+    s_values_eye_label = lv_label_create(s_values_checkbox);
+    lv_label_set_text(s_values_eye_label, LV_SYMBOL_EYE_OPEN);
+    lv_obj_set_style_text_font(s_values_eye_label, &lv_font_montserrat_16, 0);
+    lv_obj_center(s_values_eye_label);
+
+    if (s_state && s_state->prefs.show_values) {
+        lv_obj_add_state(s_values_checkbox, LV_STATE_CHECKED);
+    } else {
+        lv_obj_clear_state(s_values_checkbox, LV_STATE_CHECKED);
+    }
+    update_values_toggle_icon();
 
     s_table_body = lv_obj_create(screen);
     lv_obj_set_size(s_table_body, 800, 356);
-    lv_obj_align(s_table_body, LV_ALIGN_TOP_LEFT, 0, 78);
+    lv_obj_align(s_table_body, LV_ALIGN_TOP_LEFT, 0, 38);
     lv_obj_set_style_bg_color(s_table_body, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_border_width(s_table_body, 0, 0);
     lv_obj_set_style_pad_left(s_table_body, 10, 0);
@@ -1756,6 +1858,8 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_set_style_anim_time(s_table_body, 120, LV_PART_MAIN);
     lv_obj_clear_flag(s_table_body, LV_OBJ_FLAG_SCROLL_ELASTIC);
     lv_obj_set_scrollbar_mode(s_table_body, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_event_cb(s_table_body, table_scroll_event, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(s_table_body, table_scroll_event, LV_EVENT_SCROLL_END, NULL);
 
     s_empty_label = lv_label_create(s_table_body);
     lv_label_set_text(s_empty_label, "Watchlist empty. Add coins to get started.");
@@ -1766,7 +1870,7 @@ lv_obj_t *ui_home_screen_create(void)
     lv_obj_move_foreground(s_add_label);
     lv_obj_move_foreground(footer);
 
-    ui_nav_attach(screen, UI_NAV_HOME);
+    ui_nav_attach_with_home_label(screen, UI_NAV_HOME, "CoinWatch");
     update_sort_buttons();
     return screen;
 }

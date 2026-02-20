@@ -10,13 +10,13 @@ Repo: https://github.com/jaydawgx7/CryptoTracker_7in
 
 ## Highlights
 
-- Dual data sources: Kraken (prices) with CoinGecko fallback + percent sync.
-- Modern LVGL UI: watchlist, coin detail, add coin, alerts, settings.
-- Persistent preferences (theme, sort, refresh rate, show values, brightness).
-- Privacy toggle to hide portfolio values.
-- Alerts with toast + optional buzzer.
+- Dashboard + CoinWatch split with portfolio snapshot, market sentiment, and macro cards.
+- Fear & Greed service with CoinMarketCap primary source, persistent cooldown, and alternative.me fallback.
+- Demo Portfolio mode for screenshot-safe demos (real portfolio preserved).
+- Modern LVGL UI: watchlist, coin detail, add coin, alerts, dashboard, settings, themes.
+- Persistent preferences (theme, sorting, refresh cadence, privacy mode, brightness, demo toggle).
 - GitHub Releases OTA updates with rollback support.
-- Web UI endpoints for screenshots and watchlist backup/restore.
+- Web endpoints for screenshot capture and watchlist backup/restore.
 
 ## Build and Flash (PlatformIO)
 
@@ -39,30 +39,53 @@ pio device monitor -b 115200
 
 ## Screenshots
 
-![Home](Screenshots/Home.png)
-![Coin Detail](Screenshots/Crypto_Detail.png)
-![Add Coin](Screenshots/Add_Coin.png)
-![Settings](Screenshots/Settings.png)
-![Theme Settings](Screenshots/Theme_Settings.png)
-![Purple Theme](Screenshots/Purple_Theme.png)
+<table width="100%" cellpadding="12">
+  <tr>
+    <td><img src="Screenshots/Dashboard.png" alt="Dashboard" width="120%" /></td>
+    <td><img src="Screenshots/CoinWatch.png" alt="CoinWatch" width="120%" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/Crypto_Detail.png" alt="Coin Detail" width="120%" /></td>
+    <td><img src="Screenshots/Add_Coin.png" alt="Add Coin" width="120%" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/Settings.png" alt="Settings" width="120%" /></td>
+    <td><img src="Screenshots/Theme_Settings.png" alt="Theme Settings" width="120%" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/Purple_Theme.png" alt="Purple Theme" width="120%" /></td>
+    <td></td>
+  </tr>
+</table>
 
 ## Features
 
-### Home
+### Dashboard
+- Portfolio Snapshot with totals and market summary.
+- Fear & Greed card with live source transparency when fallback is active.
+- Demo mode indicator when Demo Portfolio is enabled.
+
+### CoinWatch
 - Watchlist with sorting (Symbol, Price, 1h, 24h, 7d, Value).
 - Long-press row actions: edit holdings, alerts, pin, remove.
 - Show values toggle (privacy mode).
+- Footer state indicator for Demo Portfolio mode.
 
 ### Coin Detail
 - Title with live price, holdings/value summary.
 - Percent chips: 1h, 24h, 7d, 30d, 1y.
 - Chart with axis labels + range buttons.
 
+### Add Coin
+- Search and add from supported symbols.
+- Fast quantity entry with persisted watchlist state.
+
 ### Settings
 - WiFi manager.
 - Brightness slider (control MCU).
 - Theme and UI preferences.
 - Refresh interval.
+- Demo Portfolio toggle in Firmware Update card.
 - Buzzer test.
 - Firmware update via GitHub Releases (check + install).
 
@@ -110,7 +133,7 @@ A PowerShell helper is available at [scripts/release.ps1](scripts/release.ps1).
 Example:
 
 ```
-./scripts/release.ps1 -Version v1.1.0
+./scripts/release.ps1 -Version v1.2.0
 ```
 
 ## Data Sources
