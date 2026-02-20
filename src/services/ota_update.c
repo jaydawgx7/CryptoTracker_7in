@@ -12,10 +12,13 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "services/scheduler.h"
+
 static const char *TAG = "ota_update";
 
 #define OTA_URL_MAX_LEN 256
 #define OTA_MIN_INTERVAL_MS 5000
+#define OTA_HTTP_BUFFER_SIZE 8192
 
 static SemaphoreHandle_t s_mutex = NULL;
 static ota_status_t s_status = {0};
@@ -81,13 +84,24 @@ static void ota_task(void *arg)
                  next->size);
     }
 
+    scheduler_set_paused(true);
+    vTaskDelay(pdMS_TO_TICKS(300));
+
     set_status(OTA_STATE_DOWNLOADING, 0, 0, "Starting");
 
     esp_http_client_config_t http_cfg = {
         .url = url,
         .timeout_ms = 10000,
-        .crt_bundle_attach = esp_crt_bundle_attach
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = OTA_HTTP_BUFFER_SIZE,
+        .buffer_size_tx = 2048,
+        .keep_alive_enable = true,
+        .disable_auto_redirect = false
     };
+
+    if (strstr(url, "github.com") || strstr(url, "githubusercontent.com")) {
+        http_cfg.user_agent = "CryptoTracker_7in";
+    }
 
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg
@@ -98,6 +112,7 @@ static void ota_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
         set_status(OTA_STATE_FAILED, 0, err, "Begin failed");
+        scheduler_set_paused(false);
         s_task = NULL;
         vTaskDelete(NULL);
         return;
@@ -126,6 +141,7 @@ static void ota_task(void *arg)
         ESP_LOGE(TAG, "OTA perform failed: %s", esp_err_to_name(err));
         esp_https_ota_abort(ota_handle);
         set_status(OTA_STATE_FAILED, 0, err, "Download failed");
+        scheduler_set_paused(false);
         s_task = NULL;
         vTaskDelete(NULL);
         return;
@@ -135,6 +151,7 @@ static void ota_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA finish failed: %s", esp_err_to_name(err));
         set_status(OTA_STATE_FAILED, 0, err, "Finish failed");
+        scheduler_set_paused(false);
         s_task = NULL;
         vTaskDelete(NULL);
         return;

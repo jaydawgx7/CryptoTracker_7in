@@ -13,6 +13,7 @@ typedef struct {
 	char id[32];
 	char symbol[12];
 	char name[48];
+	double usd_price;
 } coin_meta_t;
 
 typedef struct {

@@ -315,6 +315,11 @@ bool wifi_manager_get_ip(char *out, size_t len)
         return false;
     }
 
+    if (ip_info.ip.addr == 0) {
+        out[0] = '\0';
+        return false;
+    }
+
     snprintf(out, len, IPSTR, IP2STR(&ip_info.ip));
     return true;
 }

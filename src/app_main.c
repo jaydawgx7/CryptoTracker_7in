@@ -10,6 +10,7 @@
 #include "services/control_mcu.h"
 #include "services/coingecko_client.h"
 #include "services/display_driver.h"
+#include "services/fng_service.h"
 #include "services/http_server.h"
 #include "services/i2c_bus.h"
 #include "services/nvs_store.h"
@@ -143,6 +144,7 @@ void app_main(void)
     if (CT_WIFI_ENABLE) {
         ESP_ERROR_CHECK(wifi_manager_init());
         ESP_ERROR_CHECK(coingecko_client_init());
+        ESP_ERROR_CHECK(fng_service_init());
         ESP_ERROR_CHECK(http_server_init());
         http_server_set_state(&s_app_state);
     } else {

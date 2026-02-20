@@ -26,7 +26,11 @@ static lv_disp_draw_buf_t s_draw_buf;
 static StaticTask_t s_lvgl_task_buf;
 static StackType_t s_lvgl_stack[16384 / sizeof(StackType_t)] DRAM_ATTR;
 
-#define DISP_BUF_LINES 40
+#ifndef CT_LVGL_DISP_BUF_LINES
+#define CT_LVGL_DISP_BUF_LINES 120
+#endif
+
+#define DISP_BUF_LINES CT_LVGL_DISP_BUF_LINES
 #define CT_DISPLAY_TEST_PATTERN 0
 
 #ifndef CT_LVGL_TASK_ENABLE
@@ -243,10 +247,9 @@ esp_err_t display_driver_init(void)
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res = CT_LCD_H_RES;
-    s_disp_drv.ver_res = CT_LCD_V_RES + 40;
-    // Offset to compensate for panel vertical positioning
-    s_disp_drv.offset_x = 0;
-    s_disp_drv.offset_y = -40;
+    s_disp_drv.ver_res = CT_LCD_V_RES;
+    s_disp_drv.offset_x = CT_LCD_X_OFFSET;
+    s_disp_drv.offset_y = CT_LCD_Y_OFFSET;
     s_disp_drv.flush_cb = lvgl_flush_cb;
     s_disp_drv.full_refresh = 0;
     s_disp_drv.draw_buf = &s_draw_buf;
@@ -261,10 +264,9 @@ esp_err_t display_driver_init(void)
 #else
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res = CT_LCD_H_RES;
-    s_disp_drv.ver_res = CT_LCD_V_RES + 40;
-    // Offset to compensate for panel vertical positioning
-    s_disp_drv.offset_x = 0;
-    s_disp_drv.offset_y = -40;
+    s_disp_drv.ver_res = CT_LCD_V_RES;
+    s_disp_drv.offset_x = CT_LCD_X_OFFSET;
+    s_disp_drv.offset_y = CT_LCD_Y_OFFSET;
     s_disp_drv.flush_cb = lvgl_flush_cb;
     s_disp_drv.draw_buf = &s_draw_buf;
     s_disp_drv.user_data = NULL;

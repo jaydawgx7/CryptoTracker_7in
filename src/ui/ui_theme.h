@@ -22,4 +22,5 @@ void ui_theme_set_accent(uint32_t accent_hex);
 void ui_theme_set_shadow_color(uint32_t shadow_hex);
 void ui_theme_set_dark_mode(bool dark_mode);
 void ui_theme_set_buttons_3d(bool enabled);
+void ui_theme_set_shadow_strength(uint8_t level);
 const ui_theme_colors_t *ui_theme_get(void);

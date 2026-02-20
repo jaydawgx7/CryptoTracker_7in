@@ -259,6 +259,116 @@ static esp_err_t parse_search_results(const char *json, coin_list_t *list, size_
     return ESP_OK;
 }
 
+static char *build_ids_query(const coin_list_t *list)
+{
+    if (!list || !list->items || list->count == 0) {
+        return NULL;
+    }
+
+    size_t cap = list->count * 40;
+    if (cap < 64) {
+        cap = 64;
+    }
+
+    char *ids = malloc(cap);
+    if (!ids) {
+        return NULL;
+    }
+
+    size_t pos = 0;
+    ids[0] = '\0';
+    for (size_t i = 0; i < list->count; i++) {
+        const char *id = list->items[i].id;
+        if (!id || id[0] == '\0') {
+            continue;
+        }
+
+        size_t id_len = strlen(id);
+        size_t needed = pos + id_len + ((pos > 0) ? 1 : 0) + 1;
+        if (needed > cap) {
+            size_t new_cap = cap * 2;
+            while (new_cap < needed) {
+                new_cap *= 2;
+            }
+            char *grown = realloc(ids, new_cap);
+            if (!grown) {
+                free(ids);
+                return NULL;
+            }
+            ids = grown;
+            cap = new_cap;
+        }
+
+        if (pos > 0) {
+            ids[pos++] = ',';
+        }
+        memcpy(ids + pos, id, id_len);
+        pos += id_len;
+        ids[pos] = '\0';
+    }
+
+    if (pos == 0) {
+        free(ids);
+        return NULL;
+    }
+
+    return ids;
+}
+
+static void enrich_search_prices(coin_list_t *list)
+{
+    if (!list || !list->items || list->count == 0) {
+        return;
+    }
+
+    char *ids_csv = build_ids_query(list);
+    if (!ids_csv) {
+        return;
+    }
+
+    char *ids_encoded = url_encode(ids_csv);
+    free(ids_csv);
+    if (!ids_encoded) {
+        return;
+    }
+
+    char url[1024];
+    snprintf(url,
+             sizeof(url),
+             "%s/api/v3/simple/price?ids=%s&vs_currencies=usd",
+             COINGECKO_BASE_URL,
+             ids_encoded);
+    free(ids_encoded);
+
+    char *json = NULL;
+    if (http_get_json(url, &json) != ESP_OK || !json) {
+        free(json);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    for (size_t i = 0; i < list->count; i++) {
+        list->items[i].usd_price = 0.0;
+        cJSON *coin_obj = cJSON_GetObjectItem(root, list->items[i].id);
+        if (!coin_obj || !cJSON_IsObject(coin_obj)) {
+            continue;
+        }
+
+        cJSON *usd = cJSON_GetObjectItem(coin_obj, "usd");
+        if (cJSON_IsNumber(usd)) {
+            list->items[i].usd_price = usd->valuedouble;
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
 static chart_cache_entry_t *get_cache_entry(const char *coin_id, int days)
 {
     for (size_t i = 0; i < sizeof(s_chart_cache) / sizeof(s_chart_cache[0]); i++) {
@@ -522,6 +632,9 @@ esp_err_t coingecko_client_search_coins(const char *query, coin_list_t *list, si
 
     err = parse_search_results(json, list, limit);
     free(json);
+    if (err == ESP_OK) {
+        enrich_search_prices(list);
+    }
     return err;
 }
 

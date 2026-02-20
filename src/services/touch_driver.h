@@ -93,5 +93,30 @@
 #define CT_TOUCH_PHYS_V_RES CT_LCD_V_RES
 #endif
 
+#ifndef CT_TOUCH_FORCE_DEFAULTS
+#define CT_TOUCH_FORCE_DEFAULTS 0
+#endif
+
+typedef struct {
+	int32_t cal_x_min;
+	int32_t cal_x_max;
+	int32_t cal_y_min;
+	int32_t cal_y_max;
+	int32_t offset_x;
+	int32_t offset_y;
+} touch_calibration_t;
+
 esp_err_t touch_driver_init(void);
 void touch_driver_get_state(bool *pressed, int16_t *x, int16_t *y);
+void touch_driver_get_raw_state(bool *pressed, int16_t *x, int16_t *y);
+
+void touch_driver_get_calibration(touch_calibration_t *out);
+void touch_driver_get_default_calibration(touch_calibration_t *out);
+esp_err_t touch_driver_set_calibration(const touch_calibration_t *calibration);
+esp_err_t touch_driver_set_default_calibration(const touch_calibration_t *calibration);
+esp_err_t touch_driver_save_default_calibration(void);
+esp_err_t touch_driver_promote_current_to_default(void);
+void touch_driver_reset_calibration_defaults(void);
+esp_err_t touch_driver_save_calibration(void);
+esp_err_t touch_driver_load_calibration(bool *loaded);
+esp_err_t touch_driver_discard_calibration(void);
