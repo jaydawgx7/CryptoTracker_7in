@@ -8,8 +8,10 @@
 
 #include "esp_timer.h"
 
+#include "services/app_state_guard.h"
 #include "services/fng_service.h"
 #include "services/nvs_store.h"
+#include "services/scheduler.h"
 #include "ui/ui.h"
 #include "ui/ui_home.h"
 #include "ui/ui_nav.h"
@@ -48,7 +50,9 @@ static lv_obj_t *s_mood_class = NULL;
 static lv_obj_t *s_mood_updated = NULL;
 static lv_obj_t *s_mood_fallback = NULL;
 static lv_obj_t *s_mood_arc = NULL;
+static lv_obj_t *s_loading_overlay = NULL;
 static lv_obj_t *s_loading_spinner = NULL;
+static lv_obj_t *s_loading_label = NULL;
 static bool s_initial_data_loaded = false;
 static int64_t s_spinner_started_us = 0;
 static lv_obj_t *s_footer_updated = NULL;
@@ -86,6 +90,54 @@ static lv_obj_t *s_btc_price_change = NULL;
 
 static dash_item_row_t s_top_rows[DASH_TOP5_ROWS] = {0};
 
+static void refresh_dashboard_internal(bool require_active);
+
+static void set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (!label || !text) {
+        return;
+    }
+
+    const char *current = lv_label_get_text(label);
+    if (current && strcmp(current, text) == 0) {
+        return;
+    }
+
+    lv_label_set_text(label, text);
+}
+
+static void set_hidden_if_changed(lv_obj_t *obj, bool hidden)
+{
+    if (!obj) {
+        return;
+    }
+
+    bool is_hidden = lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    if (is_hidden == hidden) {
+        return;
+    }
+
+    if (hidden) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static uint32_t dashboard_footer_update_period_ms(int64_t age_s)
+{
+    if (age_s < 0) {
+        return 10000;
+    }
+    if (age_s < 60) {
+        return 5000;
+    }
+    if (age_s < 3600) {
+        return 30000;
+    }
+    return 60000;
+}
+
 static bool is_finite_value(double value)
 {
     return (value - value) == 0.0;
@@ -94,6 +146,12 @@ static bool is_finite_value(double value)
 static bool dashboard_show_values(void)
 {
     return !s_state || s_state->prefs.show_values;
+}
+
+static lv_color_t muted_text_color(void)
+{
+    const ui_theme_colors_t *theme = ui_theme_get();
+    return lv_color_hex(theme ? theme->text_muted : 0x9AA1AD);
 }
 
 static void update_values_toggle_icon(void)
@@ -109,7 +167,7 @@ static void update_values_toggle_icon(void)
     uint32_t btn_bg = theme ? theme->nav_inactive_bg : 0x1B1F2A;
 
     lv_obj_set_style_bg_color(s_values_toggle_btn, lv_color_hex(btn_bg), 0);
-    lv_label_set_text(s_values_toggle_icon, show_values ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+    set_label_text_if_changed(s_values_toggle_icon, show_values ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
     lv_obj_set_style_text_color(s_values_toggle_icon, lv_color_hex(show_values ? accent : muted), 0);
 }
 
@@ -120,10 +178,15 @@ static void values_toggle_event(lv_event_t *e)
         return;
     }
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     app_state_t *state = (app_state_t *)s_state;
     state->prefs.show_values = !state->prefs.show_values;
     update_values_toggle_icon();
     (void)nvs_store_save_app_state(state);
+    app_state_guard_unlock();
     ui_dashboard_refresh();
 }
 
@@ -145,29 +208,49 @@ static void update_mood_age_label(void)
         return;
     }
 
+    uint32_t market_age_s = scheduler_get_last_market_update_age_s();
     fng_snapshot_t snapshot = {0};
     fng_service_get_snapshot(&snapshot);
 
-    if (!snapshot.has_value || snapshot.fetched_at_s <= 0) {
-        lv_label_set_text(s_footer_updated, "Updated: --");
-        return;
+    uint32_t fng_age_s = UINT32_MAX;
+    if (snapshot.has_value && snapshot.fetched_at_s > 0) {
+        int64_t now_s = esp_timer_get_time() / 1000000;
+        int64_t delta_s = (now_s > snapshot.fetched_at_s) ? (now_s - snapshot.fetched_at_s) : 0;
+        if (delta_s < 0) {
+            delta_s = 0;
+        }
+        if (delta_s <= (int64_t)UINT32_MAX) {
+            fng_age_s = (uint32_t)delta_s;
+        }
     }
 
-    int64_t now_s = esp_timer_get_time() / 1000000;
-    int64_t age_s = (now_s > snapshot.fetched_at_s) ? (now_s - snapshot.fetched_at_s) : 0;
-    if (age_s < 0) {
-        age_s = 0;
+    uint32_t age_s = market_age_s;
+    if (age_s == UINT32_MAX) {
+        age_s = fng_age_s;
+    }
+
+    if (age_s == UINT32_MAX) {
+        set_label_text_if_changed(s_footer_updated, "Updated: --");
+        if (s_footer_timer) {
+            lv_timer_set_period(s_footer_timer, dashboard_footer_update_period_ms(-1));
+        }
+        return;
     }
 
     char updated[48];
     if (age_s >= 3600) {
-        snprintf(updated, sizeof(updated), "Updated: %lldh ago", (long long)(age_s / 3600));
+        snprintf(updated, sizeof(updated), "Updated: %uh ago", (unsigned)(age_s / 3600));
     } else if (age_s >= 60) {
-        snprintf(updated, sizeof(updated), "Updated: %lldm ago", (long long)(age_s / 60));
+        unsigned minutes = (unsigned)(age_s / 60);
+        unsigned seconds = (unsigned)(age_s % 60);
+        snprintf(updated, sizeof(updated), "Updated: %um%us ago", minutes, seconds);
     } else {
-        snprintf(updated, sizeof(updated), "Updated: %llds ago", (long long)age_s);
+        snprintf(updated, sizeof(updated), "Updated: %us ago", (unsigned)age_s);
     }
-    lv_label_set_text(s_footer_updated, updated);
+    set_label_text_if_changed(s_footer_updated, updated);
+    if (s_footer_timer) {
+        lv_timer_set_period(s_footer_timer, dashboard_footer_update_period_ms(age_s));
+    }
 }
 
 static void footer_timer_cb(lv_timer_t *timer)
@@ -485,6 +568,9 @@ static void create_item_row(dash_item_row_t *row, lv_obj_t *parent, lv_coord_t y
     lv_obj_set_size(row->btn, content_w, compact ? DASH_ROW_H_COMPACT : DASH_ROW_H);
     lv_obj_set_style_bg_color(row->btn, lv_color_hex(theme ? theme->nav_inactive_bg : 0x151A24), 0);
     lv_obj_set_style_border_width(row->btn, 0, 0);
+    lv_obj_set_style_shadow_width(row->btn, 0, 0);
+    lv_obj_set_style_shadow_opa(row->btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_ofs_y(row->btn, 0, 0);
     lv_obj_set_style_radius(row->btn, 8, 0);
     lv_obj_set_style_pad_left(row->btn, 10, 0);
     lv_obj_set_style_pad_right(row->btn, 10, 0);
@@ -554,9 +640,15 @@ static void set_row_interactive(dash_item_row_t *row, bool enabled)
     }
 
     if (enabled) {
-        lv_obj_clear_state(row->btn, LV_STATE_DISABLED);
+        lv_obj_add_flag(row->btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(row->btn, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+        lv_obj_set_style_bg_opa(row->btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_opa(row->btn, LV_OPA_COVER, 0);
     } else {
-        lv_obj_add_state(row->btn, LV_STATE_DISABLED);
+        lv_obj_clear_flag(row->btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(row->btn, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+        lv_obj_set_style_bg_opa(row->btn, LV_OPA_70, 0);
+        lv_obj_set_style_text_opa(row->btn, LV_OPA_70, 0);
     }
 }
 
@@ -571,10 +663,10 @@ static void update_market_mood_card(void)
     fng_service_get_snapshot(&snapshot);
 
     if (!snapshot.has_value) {
-        lv_label_set_text(s_mood_value, "N/A");
-        lv_label_set_text(s_mood_class, "N/A");
+        set_label_text_if_changed(s_mood_value, "N/A");
+        set_label_text_if_changed(s_mood_class, "N/A");
         if (s_mood_fallback) {
-            lv_obj_add_flag(s_mood_fallback, LV_OBJ_FLAG_HIDDEN);
+            set_hidden_if_changed(s_mood_fallback, true);
         }
         lv_arc_set_value(s_mood_arc, 0);
         lv_obj_set_style_arc_color(s_mood_arc, lv_color_hex(theme ? theme->text_muted : 0x9AA1AD), LV_PART_INDICATOR);
@@ -585,12 +677,12 @@ static void update_market_mood_card(void)
 
     char value[8];
     snprintf(value, sizeof(value), "%d", snapshot.value);
-    lv_label_set_text(s_mood_value, value);
+    set_label_text_if_changed(s_mood_value, value);
     lv_obj_clear_flag(s_mood_value, LV_OBJ_FLAG_HIDDEN);
 
     char mood[64];
     snprintf(mood, sizeof(mood), "%s", snapshot.classification[0] ? snapshot.classification : "N/A");
-    lv_label_set_text(s_mood_class, mood);
+    set_label_text_if_changed(s_mood_class, mood);
     lv_obj_clear_flag(s_mood_class, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_align_to(s_mood_value, s_mood_arc, LV_ALIGN_CENTER, 0, -28);
@@ -600,19 +692,22 @@ static void update_market_mood_card(void)
 
     if (s_mood_fallback) {
         if (snapshot.using_fallback) {
-            lv_obj_clear_flag(s_mood_fallback, LV_OBJ_FLAG_HIDDEN);
+            set_hidden_if_changed(s_mood_fallback, false);
         } else {
-            lv_obj_add_flag(s_mood_fallback, LV_OBJ_FLAG_HIDDEN);
+            set_hidden_if_changed(s_mood_fallback, true);
         }
     }
 
     lv_color_t color = mood_color(snapshot.value);
     lv_arc_set_value(s_mood_arc, snapshot.value);
     lv_obj_set_style_arc_color(s_mood_arc, color, LV_PART_INDICATOR);
-    if (snapshot.stale) {
-        lv_obj_set_style_text_color(s_mood_value, lv_color_hex(theme ? theme->text_muted : 0x9AA1AD), 0);
+    if (snapshot.stale || snapshot.error) {
+        lv_color_t muted = muted_text_color();
+        lv_obj_set_style_text_color(s_mood_value, muted, 0);
+        lv_obj_set_style_text_color(s_mood_class, muted, 0);
     } else {
         lv_obj_set_style_text_color(s_mood_value, color, 0);
+        lv_obj_set_style_text_color(s_mood_class, lv_color_hex(theme ? theme->text_primary : 0xE6E6E6), 0);
     }
 
     update_mood_age_label();
@@ -635,10 +730,18 @@ static void update_portfolio_snapshot_card(void)
     bool show_values = dashboard_show_values();
 
     if (!s_state || s_state->watchlist_count == 0) {
-        lv_label_set_text(s_portfolio_total, show_values ? "$0.00" : "Hidden");
-        lv_label_set_text(s_portfolio_24h, "24h: --");
-        lv_label_set_text(s_portfolio_7d, "");
-        lv_label_set_text(s_portfolio_meta, "Holdings: 0 coins");
+        set_label_text_if_changed(s_portfolio_total, show_values ? "$0.00" : "Hidden");
+        set_label_text_if_changed(s_portfolio_24h, "24h: --");
+        set_label_text_if_changed(s_portfolio_7d, "");
+        set_label_text_if_changed(s_portfolio_meta, "Holdings: 0 coins");
+        return;
+    }
+
+    if (!scheduler_is_portfolio_data_ready()) {
+        set_label_text_if_changed(s_portfolio_total, show_values ? "Loading..." : "Hidden");
+        set_label_text_if_changed(s_portfolio_24h, "24h: --");
+        set_hidden_if_changed(s_portfolio_7d, true);
+        set_label_text_if_changed(s_portfolio_meta, "Holdings: Loading...");
         return;
     }
 
@@ -673,14 +776,14 @@ static void update_portfolio_snapshot_card(void)
 
     char total_text[32];
     format_usd(total, total_text, sizeof(total_text));
-    lv_label_set_text(s_portfolio_total, show_values ? total_text : "Hidden");
+    set_label_text_if_changed(s_portfolio_total, show_values ? total_text : "Hidden");
 
     char p24[24];
     double change_24h = (total > 0.0) ? (weighted_24h / total) : 0.0;
     format_percent(change_24h, p24, sizeof(p24));
     char line_24[48];
     snprintf(line_24, sizeof(line_24), "24h: %s", p24);
-    lv_label_set_text(s_portfolio_24h, line_24);
+    set_label_text_if_changed(s_portfolio_24h, line_24);
     lv_obj_set_style_text_color(s_portfolio_24h, percent_color(change_24h), 0);
 
     if (has_7d && total > 0.0) {
@@ -689,11 +792,11 @@ static void update_portfolio_snapshot_card(void)
         format_percent(change_7d, p7, sizeof(p7));
         char line_7d[48];
         snprintf(line_7d, sizeof(line_7d), "7d: %s", p7);
-        lv_label_set_text(s_portfolio_7d, line_7d);
+        set_label_text_if_changed(s_portfolio_7d, line_7d);
         lv_obj_set_style_text_color(s_portfolio_7d, percent_color(change_7d), 0);
-        lv_obj_clear_flag(s_portfolio_7d, LV_OBJ_FLAG_HIDDEN);
+        set_hidden_if_changed(s_portfolio_7d, false);
     } else {
-        lv_obj_add_flag(s_portfolio_7d, LV_OBJ_FLAG_HIDDEN);
+        set_hidden_if_changed(s_portfolio_7d, true);
     }
 
     char meta[96];
@@ -706,7 +809,7 @@ static void update_portfolio_snapshot_card(void)
     } else {
         snprintf(meta, sizeof(meta), "Holdings: %u coins", (unsigned)holdings_count);
     }
-    lv_label_set_text(s_portfolio_meta, meta);
+    set_label_text_if_changed(s_portfolio_meta, meta);
 }
 
 static void update_bitcoin_dominance_card(void)
@@ -720,6 +823,8 @@ static void update_bitcoin_dominance_card(void)
     const ui_theme_colors_t *theme = ui_theme_get();
     fng_snapshot_t snapshot = {0};
     fng_service_get_snapshot(&snapshot);
+    bool stale = snapshot.market_metrics_stale || snapshot.stale;
+    lv_color_t muted = muted_text_color();
 
     if (!snapshot.has_btc_dominance || !snapshot.has_eth_dominance) {
         lv_label_set_text(s_alt_btc_value, "--");
@@ -754,20 +859,23 @@ static void update_bitcoin_dominance_card(void)
     lv_label_set_text(s_alt_eth_value, value_buf);
     snprintf(value_buf, sizeof(value_buf), "%.1f%%", others);
     lv_label_set_text(s_alt_others_value, value_buf);
+    lv_obj_set_style_text_color(s_alt_btc_value, stale ? muted : lv_color_hex(theme ? theme->text_primary : 0xE6E6E6), 0);
+    lv_obj_set_style_text_color(s_alt_eth_value, stale ? muted : lv_color_hex(theme ? theme->text_primary : 0xE6E6E6), 0);
+    lv_obj_set_style_text_color(s_alt_others_value, stale ? muted : lv_color_hex(theme ? theme->text_primary : 0xE6E6E6), 0);
 
     char change_buf[24];
     format_percent(snapshot.btc_dominance_change_24h, change_buf, sizeof(change_buf));
     lv_label_set_text(s_alt_btc_change, change_buf);
-    lv_obj_set_style_text_color(s_alt_btc_change, percent_color(snapshot.btc_dominance_change_24h), 0);
+    lv_obj_set_style_text_color(s_alt_btc_change, stale ? muted : percent_color(snapshot.btc_dominance_change_24h), 0);
 
     format_percent(snapshot.eth_dominance_change_24h, change_buf, sizeof(change_buf));
     lv_label_set_text(s_alt_eth_change, change_buf);
-    lv_obj_set_style_text_color(s_alt_eth_change, percent_color(snapshot.eth_dominance_change_24h), 0);
+    lv_obj_set_style_text_color(s_alt_eth_change, stale ? muted : percent_color(snapshot.eth_dominance_change_24h), 0);
 
     double others_change = -(snapshot.btc_dominance_change_24h + snapshot.eth_dominance_change_24h);
     format_percent(others_change, change_buf, sizeof(change_buf));
     lv_label_set_text(s_alt_others_change, change_buf);
-    lv_obj_set_style_text_color(s_alt_others_change, percent_color(others_change), 0);
+    lv_obj_set_style_text_color(s_alt_others_change, stale ? muted : percent_color(others_change), 0);
 
     lv_coord_t track_w = lv_obj_get_width(s_alt_track);
     if (track_w <= 0) {
@@ -809,6 +917,9 @@ static void update_market_strip_card(void)
     const ui_theme_colors_t *theme = ui_theme_get();
     fng_snapshot_t snapshot = {0};
     fng_service_get_snapshot(&snapshot);
+    bool market_stale = snapshot.market_metrics_stale || snapshot.stale;
+    bool btc_stale = snapshot.btc_price_stale || snapshot.stale;
+    lv_color_t muted = muted_text_color();
 
     char buf[32];
     char pct[24];
@@ -818,11 +929,17 @@ static void update_market_strip_card(void)
         lv_label_set_text(s_market_cap_value, buf);
         format_percent(snapshot.total_market_cap_change_24h, pct, sizeof(pct));
         lv_label_set_text(s_market_cap_change, pct);
-        lv_obj_set_style_text_color(s_market_cap_change, percent_color(snapshot.total_market_cap_change_24h), 0);
+        lv_obj_set_style_text_color(s_market_cap_value,
+                                    market_stale ? muted : lv_color_hex(theme ? theme->text_primary : 0xE6E6E6),
+                                    0);
+        lv_obj_set_style_text_color(s_market_cap_change,
+                                    market_stale ? muted : percent_color(snapshot.total_market_cap_change_24h),
+                                    0);
     } else {
         lv_label_set_text(s_market_cap_value, "$--");
         lv_label_set_text(s_market_cap_change, "--");
-        lv_obj_set_style_text_color(s_market_cap_change, lv_color_hex(theme ? theme->text_muted : 0x9AA1AD), 0);
+        lv_obj_set_style_text_color(s_market_cap_value, muted, 0);
+        lv_obj_set_style_text_color(s_market_cap_change, muted, 0);
     }
 
     if (snapshot.has_btc_price) {
@@ -830,11 +947,17 @@ static void update_market_strip_card(void)
         lv_label_set_text(s_btc_price_value, buf);
         format_percent(snapshot.btc_price_change_24h, pct, sizeof(pct));
         lv_label_set_text(s_btc_price_change, pct);
-        lv_obj_set_style_text_color(s_btc_price_change, percent_color(snapshot.btc_price_change_24h), 0);
+        lv_obj_set_style_text_color(s_btc_price_value,
+                                    btc_stale ? muted : lv_color_hex(theme ? theme->text_primary : 0xE6E6E6),
+                                    0);
+        lv_obj_set_style_text_color(s_btc_price_change,
+                                    btc_stale ? muted : percent_color(snapshot.btc_price_change_24h),
+                                    0);
     } else {
         lv_label_set_text(s_btc_price_value, "$--");
         lv_label_set_text(s_btc_price_change, "--");
-        lv_obj_set_style_text_color(s_btc_price_change, lv_color_hex(theme ? theme->text_muted : 0x9AA1AD), 0);
+        lv_obj_set_style_text_color(s_btc_price_value, muted, 0);
+        lv_obj_set_style_text_color(s_btc_price_change, muted, 0);
     }
 }
 
@@ -937,9 +1060,12 @@ void ui_dashboard_set_state(const app_state_t *state)
     s_state = state;
 }
 
-void ui_dashboard_refresh(void)
+static void refresh_dashboard_internal(bool require_active)
 {
     if (!s_screen || !lv_obj_is_valid(s_screen)) {
+        return;
+    }
+    if (require_active && lv_scr_act() != s_screen) {
         return;
     }
 
@@ -950,14 +1076,15 @@ void ui_dashboard_refresh(void)
     update_market_strip_card();
     update_top_holdings_card();
 
-    if (s_loading_spinner && lv_obj_is_valid(s_loading_spinner)) {
-        lv_obj_move_foreground(s_loading_spinner);
+    if (s_loading_overlay && lv_obj_is_valid(s_loading_overlay)) {
+        lv_obj_move_foreground(s_loading_overlay);
     }
 
-    if (!s_initial_data_loaded && s_loading_spinner) {
+    if (!s_initial_data_loaded && s_loading_overlay) {
         fng_snapshot_t snapshot = {0};
         fng_service_get_snapshot(&snapshot);
-        bool data_ready = snapshot.has_value;
+        bool portfolio_ready = !s_state || s_state->watchlist_count == 0 || scheduler_is_portfolio_data_ready();
+        bool data_ready = snapshot.has_value && portfolio_ready;
         bool timed_out = false;
         if (s_spinner_started_us > 0) {
             int64_t now_us = esp_timer_get_time();
@@ -966,11 +1093,33 @@ void ui_dashboard_refresh(void)
 
         if (data_ready || timed_out) {
             s_initial_data_loaded = true;
-            lv_obj_del(s_loading_spinner);
+            lv_obj_del(s_loading_overlay);
+            s_loading_overlay = NULL;
             s_loading_spinner = NULL;
+            s_loading_label = NULL;
             s_spinner_started_us = 0;
         }
     }
+}
+
+void ui_dashboard_refresh(void)
+{
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
+    refresh_dashboard_internal(true);
+    app_state_guard_unlock();
+}
+
+void ui_dashboard_prepare_for_show(void)
+{
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
+    refresh_dashboard_internal(false);
+    app_state_guard_unlock();
 }
 
 lv_obj_t *ui_dashboard_screen_create(void)
@@ -1035,14 +1184,36 @@ lv_obj_t *ui_dashboard_screen_create(void)
     lv_obj_move_foreground(s_mood_value);
     lv_obj_move_foreground(s_mood_class);
 
-    s_loading_spinner = lv_spinner_create(s_screen, 1000, 70);
-    lv_obj_set_size(s_loading_spinner, 56, 56);
-    lv_obj_center(s_loading_spinner);
-    lv_obj_set_style_arc_width(s_loading_spinner, 5, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_loading_spinner, 5, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(s_loading_spinner, lv_color_hex(theme ? theme->text_muted : 0x9AA1AD), LV_PART_MAIN);
+    s_loading_overlay = lv_obj_create(s_screen);
+    lv_obj_set_size(s_loading_overlay, 228, 96);
+    lv_obj_center(s_loading_overlay);
+    lv_obj_set_style_bg_color(s_loading_overlay, lv_color_hex(0x05070B), 0);
+    lv_obj_set_style_bg_opa(s_loading_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_color(s_loading_overlay, lv_color_hex(0x2A3142), 0);
+    lv_obj_set_style_border_opa(s_loading_overlay, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_loading_overlay, 1, 0);
+    lv_obj_set_style_radius(s_loading_overlay, 14, 0);
+    lv_obj_set_style_pad_all(s_loading_overlay, 12, 0);
+    lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_loading_overlay, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_move_foreground(s_loading_overlay);
+
+    s_loading_spinner = lv_spinner_create(s_loading_overlay, 1600, 72);
+    lv_obj_set_size(s_loading_spinner, 34, 34);
+    lv_obj_set_style_arc_width(s_loading_spinner, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_loading_spinner, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_loading_spinner, lv_color_hex(0x1F2633), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_loading_spinner, LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_loading_spinner, lv_color_hex(theme ? theme->accent : 0x00FE8F), LV_PART_INDICATOR);
-    lv_obj_move_foreground(s_loading_spinner);
+    lv_obj_align(s_loading_spinner, LV_ALIGN_TOP_MID, 0, 6);
+
+    s_loading_label = lv_label_create(s_loading_overlay);
+    lv_label_set_text(s_loading_label, "Loading market data...");
+    lv_obj_set_width(s_loading_label, 196);
+    lv_obj_set_style_text_align(s_loading_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(s_loading_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_loading_label, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_align(s_loading_label, LV_ALIGN_BOTTOM_MID, 0, -8);
     s_spinner_started_us = esp_timer_get_time();
 
     lv_obj_t *footer = lv_obj_create(s_screen);
@@ -1065,7 +1236,7 @@ lv_obj_t *ui_dashboard_screen_create(void)
         lv_timer_del(s_footer_timer);
         s_footer_timer = NULL;
     }
-    s_footer_timer = lv_timer_create(footer_timer_cb, 1000, NULL);
+    s_footer_timer = lv_timer_create(footer_timer_cb, 5000, NULL);
 
     lv_obj_t *highlights = create_card(s_screen, "Bitcoin Dominance", DASH_RIGHT_X,
                                        DASH_TOP_Y + DASH_PORTFOLIO_H + DASH_GAP_Y,

@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "services/app_state_guard.h"
 #include "services/coingecko_client.h"
 #include "services/nvs_store.h"
 #include "services/wifi_manager.h"
@@ -358,13 +359,19 @@ static void add_coin_event(lv_event_t *e)
         return;
     }
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     if (watchlist_contains(s_selected->id)) {
+        app_state_guard_unlock();
         show_status("Already in watchlist");
         show_toast("Already in watchlist");
         return;
     }
 
     if (s_state->watchlist_count >= MAX_WATCHLIST) {
+        app_state_guard_unlock();
         show_status("Watchlist full");
         show_toast("Watchlist full");
         return;
@@ -379,6 +386,7 @@ static void add_coin_event(lv_event_t *e)
     s_state->watchlist_count++;
 
     esp_err_t save_err = nvs_store_save_app_state(s_state);
+    app_state_guard_unlock();
     if (save_err == ESP_OK) {
         show_status("Added to watchlist");
         show_toast("Added to watchlist");

@@ -7,6 +7,7 @@
 
 #include "models/app_state.h"
 #include "services/alert_manager.h"
+#include "services/app_state_guard.h"
 #include "services/control_mcu.h"
 #include "services/coingecko_client.h"
 #include "services/display_driver.h"
@@ -69,12 +70,9 @@ static void alert_trigger_cb(const alert_log_t *entry)
         return;
     }
 
-    if (display_driver_lock(200)) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "%s %s", entry->symbol, entry->is_high ? "High" : "Low");
-        ui_alerts_show_toast(msg);
-        display_driver_unlock();
-    }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s %s", entry->symbol, entry->is_high ? "High" : "Low");
+    ui_request_alert_toast(msg);
 
     if (s_app_state.prefs.buzzer_enabled) {
         control_mcu_buzzer_beep(120);
@@ -89,6 +87,8 @@ static void ui_init_task(void *arg)
     ESP_ERROR_CHECK(touch_driver_init());
     ESP_LOGI(TAG, "Touch init done");
     if (!CT_UI_DISABLE) {
+        ui_set_app_state(&s_app_state);
+        ESP_LOGI(TAG, "UI state preloaded");
         ui_init();
         ESP_LOGI(TAG, "UI init done");
         ui_set_app_state(&s_app_state);
@@ -120,6 +120,7 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(nvs_store_init());
+    ESP_ERROR_CHECK(app_state_guard_init());
     ESP_ERROR_CHECK(control_mcu_init());
     vTaskDelay(pdMS_TO_TICKS(200));
 

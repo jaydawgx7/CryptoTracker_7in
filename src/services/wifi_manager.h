@@ -30,3 +30,4 @@ esp_err_t wifi_manager_scan(wifi_scan_result_t *results, size_t max_results, siz
 size_t wifi_manager_get_saved(wifi_saved_network_t *out, size_t max_results);
 esp_err_t wifi_manager_add_network(const char *ssid, const char *password);
 esp_err_t wifi_manager_forget_network(const char *ssid);
+esp_err_t wifi_manager_reconnect(void);

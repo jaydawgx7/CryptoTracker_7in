@@ -44,7 +44,7 @@ typedef struct {
     bool demo_portfolio;
 } ui_prefs_t;
 
-typedef struct {
+typedef struct app_state_t {
     coin_t watchlist[MAX_WATCHLIST];
     size_t watchlist_count;
     ui_prefs_t prefs;

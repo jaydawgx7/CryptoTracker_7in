@@ -12,3 +12,5 @@
 
 esp_err_t scheduler_init(app_state_t *state);
 void scheduler_set_paused(bool paused);
+bool scheduler_is_portfolio_data_ready(void);
+uint32_t scheduler_get_last_market_update_age_s(void);

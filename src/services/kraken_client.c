@@ -14,12 +14,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "services/app_state_guard.h"
 #include "services/wifi_manager.h"
 
 static const char *TAG = "kraken";
 
 #define KRAKEN_BASE_URL "https://api.kraken.com"
 #define KRAKEN_TICKER_ENDPOINT "/0/public/Ticker"
+#define HTTP_RETRY_COUNT 3
+#define HTTP_RETRY_DELAY_MS 1500
+#define KRAKEN_TICKER_BATCH_SIZE 4
 
 typedef struct {
     const char *symbol;
@@ -29,6 +33,13 @@ typedef struct {
 
 static esp_err_t http_get_json(const char *url, char **out);
 static bool json_to_double(const cJSON *item, double *out);
+
+static bool is_transient_http_error(esp_err_t err)
+{
+    return err == ESP_ERR_HTTP_CONNECT ||
+           err == ESP_ERR_TIMEOUT ||
+           err == ESP_ERR_HTTP_EAGAIN;
+}
 
 typedef struct {
     const char *symbol;
@@ -443,39 +454,66 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
 static esp_err_t http_get_json(const char *url, char **out)
 {
-    http_buffer_t buffer = {0};
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .event_handler = http_event_handler,
-        .user_data = &buffer,
-        .timeout_ms = 10000
-    };
-
-    config.crt_bundle_attach = esp_crt_bundle_attach;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        return ESP_FAIL;
+    if (!url || !out) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
+    *out = NULL;
+    esp_err_t last_err = ESP_FAIL;
 
-    if (err != ESP_OK || status != 200) {
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "HTTP GET failed: %s url=%s", esp_err_to_name(err), url);
-        } else {
-            ESP_LOGW(TAG, "HTTP GET status=%d url=%s", status, url);
+    for (int attempt = 0; attempt < HTTP_RETRY_COUNT; attempt++) {
+        http_buffer_t buffer = {0};
+
+        esp_http_client_config_t config = {
+            .url = url,
+            .event_handler = http_event_handler,
+            .user_data = &buffer,
+            .timeout_ms = 10000,
+            .keep_alive_enable = false,
+        };
+
+        config.crt_bundle_attach = esp_crt_bundle_attach;
+
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client) {
+            return ESP_FAIL;
         }
+
+        esp_http_client_set_header(client, "Accept", "application/json");
+
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+
+        if (err == ESP_OK && status == 200) {
+            esp_http_client_cleanup(client);
+            *out = buffer.buf;
+            return ESP_OK;
+        }
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP GET failed: %s url=%s attempt=%d/%d", esp_err_to_name(err), url, attempt + 1, HTTP_RETRY_COUNT);
+            last_err = err;
+        } else {
+            ESP_LOGW(TAG, "HTTP GET status=%d url=%s attempt=%d/%d", status, url, attempt + 1, HTTP_RETRY_COUNT);
+            last_err = (status == 429) ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        }
+
         free(buffer.buf);
         esp_http_client_cleanup(client);
-        return err != ESP_OK ? err : ESP_FAIL;
+
+        if (status == 429) {
+            return last_err;
+        }
+
+        if (attempt + 1 < HTTP_RETRY_COUNT && is_transient_http_error(last_err)) {
+            vTaskDelay(pdMS_TO_TICKS(HTTP_RETRY_DELAY_MS));
+            continue;
+        }
+
+        return last_err;
     }
 
-    esp_http_client_cleanup(client);
-    *out = buffer.buf;
-    return ESP_OK;
+    return last_err;
 }
 
 static bool json_to_double(const cJSON *item, double *out)
@@ -496,6 +534,128 @@ static bool json_to_double(const cJSON *item, double *out)
         }
     }
     return false;
+}
+
+static esp_err_t fetch_price_batch(kraken_pair_t *pairs, size_t pair_count, bool *out_any_missing, bool *out_any_updated)
+{
+    if (!pairs || pair_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (out_any_missing) {
+        *out_any_missing = false;
+    }
+    if (out_any_updated) {
+        *out_any_updated = false;
+    }
+
+    size_t csv_len = 0;
+    for (size_t i = 0; i < pair_count; i++) {
+        csv_len += strlen(pairs[i].request_pair) + 1;
+    }
+
+    char *csv = malloc(csv_len + 1);
+    if (!csv) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    csv[0] = '\0';
+    for (size_t i = 0; i < pair_count; i++) {
+        if (i > 0) {
+            strcat(csv, ",");
+        }
+        strcat(csv, pairs[i].request_pair);
+    }
+
+    size_t url_len = strlen(KRAKEN_BASE_URL) + strlen(KRAKEN_TICKER_ENDPOINT) + strlen("?pair=") + strlen(csv) + 1;
+    char *url = malloc(url_len);
+    if (!url) {
+        free(csv);
+        return ESP_ERR_NO_MEM;
+    }
+    snprintf(url, url_len, "%s%s?pair=%s", KRAKEN_BASE_URL, KRAKEN_TICKER_ENDPOINT, csv);
+    free(csv);
+
+    char *json = NULL;
+    esp_err_t err = http_get_json(url, &json);
+    free(url);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        return ESP_FAIL;
+    }
+
+    cJSON *error = cJSON_GetObjectItem(root, "error");
+    if (cJSON_IsArray(error) && cJSON_GetArraySize(error) > 0) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    cJSON *result = cJSON_GetObjectItem(root, "result");
+    if (!result || !cJSON_IsObject(result)) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    bool any_updated = false;
+    bool any_missing = false;
+
+    if (!app_state_guard_lock(250)) {
+        cJSON_Delete(root);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    for (size_t i = 0; i < pair_count; i++) {
+        cJSON *entry = cJSON_GetObjectItem(result, pairs[i].result_key);
+        if (!entry) {
+            entry = cJSON_GetObjectItem(result, pairs[i].request_pair);
+        }
+        if (!entry) {
+            any_missing = true;
+            ESP_LOGW(TAG, "Missing mapping for: %s", pairs[i].request_pair);
+            continue;
+        }
+
+        cJSON *last = cJSON_GetObjectItem(entry, "c");
+        cJSON *open = cJSON_GetObjectItem(entry, "o");
+        double price = 0.0;
+        double open_value = 0.0;
+
+        if (cJSON_IsArray(last) && cJSON_GetArraySize(last) > 0) {
+            cJSON *last_item = cJSON_GetArrayItem(last, 0);
+            json_to_double(last_item, &price);
+        }
+        json_to_double(open, &open_value);
+
+        if (price > 0.0) {
+            pairs[i].coin->price = price;
+            if (open_value > 0.0) {
+                pairs[i].coin->change_24h = ((price - open_value) / open_value) * 100.0;
+            }
+            any_updated = true;
+            kraken_pair_entry_t *dyn = get_dynamic_entry(pairs[i].coin ? map_symbol_to_pair(pairs[i].coin->symbol) : NULL);
+            if (dyn) {
+                dyn->price_seen = true;
+            }
+        }
+    }
+
+    app_state_guard_unlock();
+
+    cJSON_Delete(root);
+
+    if (out_any_missing) {
+        *out_any_missing = any_missing;
+    }
+    if (out_any_updated) {
+        *out_any_updated = any_updated;
+    }
+
+    return any_updated ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t kraken_client_fetch_prices(app_state_t *state, bool *out_any_missing)
@@ -520,11 +680,21 @@ esp_err_t kraken_client_fetch_prices(app_state_t *state, bool *out_any_missing)
         return ESP_ERR_INVALID_STATE;
     }
 
-    kraken_pair_t pairs[MAX_WATCHLIST] = {0};
+    size_t max_pairs = state->watchlist_count;
+    if (max_pairs > MAX_WATCHLIST) {
+        max_pairs = MAX_WATCHLIST;
+    }
+
+    kraken_pair_t *pairs = calloc(max_pairs, sizeof(*pairs));
+    const char **missing_symbols = calloc(max_pairs, sizeof(*missing_symbols));
+    if (!pairs || !missing_symbols) {
+        free(pairs);
+        free(missing_symbols);
+        return ESP_ERR_NO_MEM;
+    }
+
     size_t pair_count = 0;
     bool any_missing = false;
-
-    const char *missing_symbols[MAX_WATCHLIST] = {0};
     size_t missing_count = 0;
 
     for (size_t i = 0; i < state->watchlist_count; i++) {
@@ -565,98 +735,39 @@ esp_err_t kraken_client_fetch_prices(app_state_t *state, bool *out_any_missing)
         if (out_any_missing) {
             *out_any_missing = true;
         }
+        free(pairs);
+        free(missing_symbols);
         return ESP_ERR_INVALID_ARG;
     }
 
-    size_t csv_len = 0;
-    for (size_t i = 0; i < pair_count; i++) {
-        csv_len += strlen(pairs[i].request_pair) + 1;
-    }
-
-    char *csv = malloc(csv_len + 1);
-    if (!csv) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    csv[0] = '\0';
-    for (size_t i = 0; i < pair_count; i++) {
-        if (i > 0) {
-            strcat(csv, ",");
-        }
-        strcat(csv, pairs[i].request_pair);
-    }
-
-    char url[256];
-    snprintf(url, sizeof(url), "%s%s?pair=%s", KRAKEN_BASE_URL, KRAKEN_TICKER_ENDPOINT, csv);
-    free(csv);
-
-    char *json = NULL;
-    esp_err_t err = http_get_json(url, &json);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    cJSON *root = cJSON_Parse(json);
-    free(json);
-    if (!root) {
-        return ESP_FAIL;
-    }
-
-    cJSON *error = cJSON_GetObjectItem(root, "error");
-    if (cJSON_IsArray(error) && cJSON_GetArraySize(error) > 0) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
-    cJSON *result = cJSON_GetObjectItem(root, "result");
-    if (!result || !cJSON_IsObject(result)) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
     bool any_updated = false;
-
-    for (size_t i = 0; i < pair_count; i++) {
-        cJSON *entry = cJSON_GetObjectItem(result, pairs[i].result_key);
-        if (!entry) {
-            entry = cJSON_GetObjectItem(result, pairs[i].request_pair);
+    esp_err_t last_err = ESP_FAIL;
+    for (size_t start = 0; start < pair_count; start += KRAKEN_TICKER_BATCH_SIZE) {
+        size_t batch_count = pair_count - start;
+        if (batch_count > KRAKEN_TICKER_BATCH_SIZE) {
+            batch_count = KRAKEN_TICKER_BATCH_SIZE;
         }
-        if (!entry) {
+
+        bool batch_missing = false;
+        bool batch_updated = false;
+        esp_err_t err = fetch_price_batch(&pairs[start], batch_count, &batch_missing, &batch_updated);
+        if (batch_missing) {
             any_missing = true;
-            ESP_LOGW(TAG, "Missing mapping for: %s", pairs[i].request_pair);
+        }
+        if (err == ESP_OK) {
+            any_updated = true;
             continue;
         }
-
-        cJSON *last = cJSON_GetObjectItem(entry, "c");
-        cJSON *open = cJSON_GetObjectItem(entry, "o");
-        double price = 0.0;
-        double open_value = 0.0;
-
-        if (cJSON_IsArray(last) && cJSON_GetArraySize(last) > 0) {
-            cJSON *last_item = cJSON_GetArrayItem(last, 0);
-            json_to_double(last_item, &price);
-        }
-        json_to_double(open, &open_value);
-
-        if (price > 0.0) {
-            pairs[i].coin->price = price;
-            if (open_value > 0.0) {
-                pairs[i].coin->change_24h = ((price - open_value) / open_value) * 100.0;
-            }
-            any_updated = true;
-            kraken_pair_entry_t *dyn = get_dynamic_entry(pairs[i].coin ? map_symbol_to_pair(pairs[i].coin->symbol) : NULL);
-            if (dyn) {
-                dyn->price_seen = true;
-            }
-        }
+        last_err = err;
     }
-
-    cJSON_Delete(root);
 
     if (out_any_missing) {
         *out_any_missing = any_missing;
     }
 
-    return any_updated ? ESP_OK : ESP_FAIL;
+    free(pairs);
+    free(missing_symbols);
+
+    return any_updated ? ESP_OK : last_err;
 }
 

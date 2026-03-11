@@ -17,9 +17,11 @@
 #include "ui/ui_nav.h"
 #include "ui/ui_theme.h"
 
+#include "services/app_state_guard.h"
 #include "services/nvs_store.h"
 #include "services/control_mcu.h"
 #include "services/coingecko_client.h"
+#include "services/scheduler.h"
 
 #define SPARKLINE_POINTS 28
 
@@ -173,6 +175,7 @@ static void buzzer_result_cb(void *arg);
 static void buzzer_task(void *arg);
 static void update_values_toggle_icon(void);
 static void table_scroll_event(lv_event_t *e);
+static void refresh_home_internal(bool require_active, bool respect_throttle);
 
 static void style_modal_button(lv_obj_t *btn)
 {
@@ -274,8 +277,13 @@ void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_a
 
     char total_buf[32];
     bool show_values = !s_state || s_state->prefs.show_values;
+    bool portfolio_ready = !s_state || s_state->watchlist_count == 0 || scheduler_is_portfolio_data_ready();
     if (show_values) {
-        format_usd(compute_total_value(), total_buf, sizeof(total_buf));
+        if (portfolio_ready) {
+            format_usd(compute_total_value(), total_buf, sizeof(total_buf));
+        } else {
+            snprintf(total_buf, sizeof(total_buf), "Loading");
+        }
     } else {
         snprintf(total_buf, sizeof(total_buf), "Hidden");
     }
@@ -289,9 +297,11 @@ void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_a
         snprintf(wifi_buf, sizeof(wifi_buf), "WiFi --");
     }
 
-    char status[96];
+    char status[128];
+    bool primary_source_is_coingecko = !s_state || s_state->prefs.data_source == DATA_SOURCE_COINGECKO;
     if (rate_limited) {
-        snprintf(status, sizeof(status), "Rate limit | %s | Updated %lus | %s", wifi_buf, (unsigned long)updated_age_s, total_buf);
+        const char *limit_label = primary_source_is_coingecko ? "Rate limited" : "CoinGecko limited";
+        snprintf(status, sizeof(status), "%s | %s | Updated %lus | %s", limit_label, wifi_buf, (unsigned long)updated_age_s, total_buf);
     } else if (offline) {
         snprintf(status, sizeof(status), "Offline | %s | Updated %lus | %s", wifi_buf, (unsigned long)updated_age_s, total_buf);
     } else {
@@ -300,7 +310,9 @@ void ui_home_update_header(wifi_state_t wifi_state, int rssi, uint32_t updated_a
 
     lv_label_set_text(s_status_label, status);
     if (rate_limited) {
-        lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xD6A16A), 0);
+        lv_obj_set_style_text_color(s_status_label,
+                                    lv_color_hex(primary_source_is_coingecko ? 0xD6A16A : 0x9AA1AD),
+                                    0);
     } else {
         lv_obj_set_style_text_color(s_status_label, offline ? lv_color_hex(0xD6A16A) : lv_color_hex(0x9AA1AD), 0);
     }
@@ -339,6 +351,10 @@ static void values_toggle_event(lv_event_t *e)
         return;
     }
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     app_state_t *state = (app_state_t *)s_state;
     state->prefs.show_values = !state->prefs.show_values;
     if (state->prefs.show_values) {
@@ -348,6 +364,7 @@ static void values_toggle_event(lv_event_t *e)
     }
     update_values_toggle_icon();
     persist_state();
+    app_state_guard_unlock();
     ui_home_update_header(s_last_wifi_state, s_last_rssi, s_last_updated_age, s_offline, s_last_rate_limited);
     ui_home_refresh();
 }
@@ -395,9 +412,14 @@ static void action_pin_event(lv_event_t *e)
         return;
     }
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     app_state_t *state = (app_state_t *)s_state;
     state->watchlist[s_active_index].pinned = !state->watchlist[s_active_index].pinned;
     persist_state();
+    app_state_guard_unlock();
     ui_home_refresh();
 }
 
@@ -410,6 +432,10 @@ static void action_remove_event(lv_event_t *e)
         return;
     }
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     app_state_t *state = (app_state_t *)s_state;
     size_t count = state->watchlist_count;
     for (size_t i = s_active_index; i + 1 < count; i++) {
@@ -417,6 +443,7 @@ static void action_remove_event(lv_event_t *e)
     }
     state->watchlist_count = count > 0 ? count - 1 : 0;
     persist_state();
+    app_state_guard_unlock();
     ui_home_refresh();
 }
 
@@ -545,9 +572,13 @@ static void save_holdings_event(lv_event_t *e)
     }
 
     double scaled = round(value * 100000000.0) / 100000000.0;
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
     app_state_t *state = (app_state_t *)s_state;
     state->watchlist[s_active_index].holdings = scaled;
     persist_state();
+    app_state_guard_unlock();
     close_modal();
     ui_home_refresh();
 }
@@ -565,10 +596,15 @@ static void save_alerts_event(lv_event_t *e)
     bool has_low = parse_optional_double(lv_textarea_get_text(s_alert_low_field), &low_value);
     bool has_high = parse_optional_double(lv_textarea_get_text(s_alert_high_field), &high_value);
 
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
     app_state_t *state = (app_state_t *)s_state;
     state->watchlist[s_active_index].alert_low = has_low ? low_value : 0.0;
     state->watchlist[s_active_index].alert_high = has_high ? high_value : 0.0;
     persist_state();
+    app_state_guard_unlock();
     close_modal();
     ui_home_refresh();
 }
@@ -1282,11 +1318,11 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
     double last_price = (coin_index < MAX_WATCHLIST) ? s_last_prices[coin_index] : 0.0;
     double diff = coin->price - last_price;
     double diff_threshold = fmax(1e-12, fabs(last_price) * 0.000001);
-    bool raw_price_changed = (!s_offline && last_price > 0.0 && fabs(diff) > diff_threshold);
+    bool flash_price_changed = (!s_offline && price_changed && last_price > 0.0 && fabs(diff) > diff_threshold);
 
     if (!sym_changed && !price_changed && !value_changed && !hold_changed &&
         !pct1h_changed && !pct24h_changed && !pct7d_changed &&
-        !colors_changed && !row->flash_timer && !raw_price_changed) {
+        !colors_changed && !row->flash_timer) {
         if (coin_index < MAX_WATCHLIST) {
             s_last_prices[coin_index] = coin->price;
         }
@@ -1308,7 +1344,7 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
     set_label_color_if_changed(row->label_7d, &row->color_7d, pct_7d_color);
 
     if (!s_offline) {
-        if (last_price > 0.0 && fabs(diff) > diff_threshold) {
+        if (flash_price_changed) {
             lv_color_t flash = diff > 0.0 ? color_pos : color_neg;
             lv_obj_set_style_text_color(row->label_price, flash, 0);
             row->color_price = lv_color_to32(flash);
@@ -1568,10 +1604,14 @@ static void sort_button_event(lv_event_t *e)
         s_sort_field = field;
     }
     if (s_state) {
+        if (!app_state_guard_lock(250)) {
+            return;
+        }
         app_state_t *state = (app_state_t *)s_state;
         state->prefs.sort_field = s_sort_field;
         state->prefs.sort_desc = s_sort_desc;
         persist_state();
+        app_state_guard_unlock();
     }
     update_sort_buttons();
     ui_home_refresh();
@@ -1610,9 +1650,12 @@ bool ui_home_open_holdings_editor(size_t index)
     return true;
 }
 
-void ui_home_refresh(void)
+static void refresh_home_internal(bool require_active, bool respect_throttle)
 {
-    if (!s_screen || !lv_obj_is_valid(s_screen) || lv_scr_act() != s_screen) {
+    if (!s_screen || !lv_obj_is_valid(s_screen)) {
+        return;
+    }
+    if (require_active && lv_scr_act() != s_screen) {
         return;
     }
     if (!s_table_body || !lv_obj_is_valid(s_table_body)) {
@@ -1631,10 +1674,14 @@ void ui_home_refresh(void)
     }
 
     static int64_t s_last_refresh_ms = 0;
-    if (s_last_refresh_ms > 0 && (now_ms - s_last_refresh_ms) < 1000) {
-        return;
+    if (respect_throttle) {
+        if (s_last_refresh_ms > 0 && (now_ms - s_last_refresh_ms) < 1000) {
+            return;
+        }
+        s_last_refresh_ms = now_ms;
+    } else {
+        s_last_refresh_ms = now_ms;
     }
-    s_last_refresh_ms = now_ms;
 
     update_values_toggle_icon();
 
@@ -1683,6 +1730,26 @@ void ui_home_refresh(void)
             lv_obj_add_flag(s_rows[i].row, LV_OBJ_FLAG_HIDDEN);
         }
     }
+}
+
+void ui_home_refresh(void)
+{
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
+    refresh_home_internal(true, true);
+    app_state_guard_unlock();
+}
+
+void ui_home_prepare_for_show(void)
+{
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
+    refresh_home_internal(false, false);
+    app_state_guard_unlock();
 }
 
 lv_obj_t *ui_home_screen_create(void)

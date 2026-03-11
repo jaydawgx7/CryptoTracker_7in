@@ -28,16 +28,6 @@ static void nav_event(lv_event_t *e)
 	}
 }
 
-static void anim_set_text_opa(void *obj, int32_t value)
-{
-	lv_obj_set_style_text_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
-}
-
-static void anim_set_transform_zoom(void *obj, int32_t value)
-{
-	lv_obj_set_style_transform_zoom((lv_obj_t *)obj, (lv_coord_t)value, 0);
-}
-
 static lv_obj_t *create_nav_button(lv_obj_t *parent, const char *label, ui_nav_page_t page, bool active)
 {
 	const ui_theme_colors_t *theme = ui_theme_get();
@@ -112,15 +102,6 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 	}
 
 	if (!back_only && active_page < 4 && buttons[active_page]) {
-		lv_obj_t *label = lv_obj_get_child(buttons[active_page], 0);
-		if (label) {
-			lv_obj_set_style_text_opa(label, LV_OPA_0, 0);
-			lv_obj_set_style_transform_zoom(label, 220, 0);
-
-			anim_set_text_opa(label, LV_OPA_COVER);
-			anim_set_transform_zoom(label, 256);
-		}
-
 		lv_obj_t *indicator = lv_obj_create(nav);
 		lv_obj_add_flag(indicator, LV_OBJ_FLAG_FLOATING);
 		lv_obj_set_size(indicator, 70, 4);
@@ -141,8 +122,6 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 		lv_obj_set_style_border_width(badge, 0, 0);
 		lv_obj_set_style_radius(badge, 5, 0);
 		lv_obj_align(badge, LV_ALIGN_TOP_RIGHT, -6, 4);
-
-		anim_set_transform_zoom(badge, 256);
 	}
 }
 

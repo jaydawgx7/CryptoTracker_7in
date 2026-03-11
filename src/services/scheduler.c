@@ -2,6 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <math.h>
@@ -12,8 +13,10 @@
 #include "services/kraken_client.h"
 #include "services/wifi_manager.h"
 #include "services/alert_manager.h"
+#include "ui/ui.h"
 #include "ui/ui_dashboard.h"
 #include "ui/ui_home.h"
+#include "ui/ui_coin_detail.h"
 #include "ui/ui_alerts.h"
 
 static const char *TAG = "scheduler";
@@ -36,10 +39,49 @@ static int64_t s_last_ui_refresh_s = 0;
 static int64_t s_last_header_update_s = 0;
 static bool s_paused = false;
 static size_t s_last_watchlist_count = 0;
+static size_t s_ready_watchlist_count = 0;
+static bool s_market_fetch_succeeded_once = false;
+static bool s_portfolio_data_ready = false;
+static int64_t s_last_market_success_us = 0;
 static double s_last_prices[MAX_WATCHLIST] = {0};
 static double s_last_change_1h[MAX_WATCHLIST] = {0};
 static double s_last_change_24h[MAX_WATCHLIST] = {0};
 static double s_last_change_7d[MAX_WATCHLIST] = {0};
+static uint32_t s_network_error_streak = 0;
+static int64_t s_last_stack_log_s = 0;
+
+static bool is_network_fetch_error(esp_err_t err)
+{
+    return err == ESP_ERR_HTTP_CONNECT ||
+           err == ESP_ERR_TIMEOUT ||
+           err == ESP_ERR_HTTP_EAGAIN ||
+           err == ESP_ERR_HTTP_FETCH_HEADER ||
+           err == ESP_ERR_HTTP_WRITE_DATA;
+}
+
+static bool value_is_finite(double value)
+{
+    return (value - value) == 0.0;
+}
+
+static bool all_held_assets_priced(const app_state_t *state)
+{
+    if (!state) {
+        return false;
+    }
+
+    for (size_t i = 0; i < state->watchlist_count; i++) {
+        const coin_t *coin = &state->watchlist[i];
+        if (coin->holdings <= 0.0) {
+            continue;
+        }
+        if (!value_is_finite(coin->price) || coin->price <= 0.0) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 static bool market_data_changed(const app_state_t *state)
 {
@@ -91,6 +133,25 @@ static uint32_t clamp_refresh_seconds(uint32_t value, data_source_t source)
     return value;
 }
 
+static uint32_t dashboard_metrics_interval_s_for_snapshot(const fng_snapshot_t *snapshot)
+{
+    if (!snapshot ||
+        !snapshot->has_value ||
+        snapshot->stale ||
+        snapshot->error ||
+        snapshot->using_fallback ||
+        snapshot->market_metrics_stale ||
+        snapshot->btc_price_stale ||
+        !snapshot->has_btc_dominance ||
+        !snapshot->has_eth_dominance ||
+        !snapshot->has_total_market_cap ||
+        !snapshot->has_btc_price) {
+        return 60;
+    }
+
+    return 3600;
+}
+
 static void refresh_task(void *arg)
 {
     (void)arg;
@@ -103,9 +164,15 @@ static void refresh_task(void *arg)
             continue;
         }
 
-        if (!s_state || s_state->watchlist_count == 0) {
+        if (!s_state) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
+        }
+
+        if (s_state->watchlist_count != s_ready_watchlist_count) {
+            s_ready_watchlist_count = s_state->watchlist_count;
+            s_market_fetch_succeeded_once = false;
+            s_portfolio_data_ready = false;
         }
 
         data_source_t source = s_state->prefs.data_source;
@@ -127,18 +194,25 @@ static void refresh_task(void *arg)
         }
 
         int64_t now_s = esp_timer_get_time() / 1000000;
+        if ((now_s - s_last_stack_log_s) >= 30) {
+            UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI(TAG, "Refresh task stack watermark: %u words", (unsigned)watermark);
+            s_last_stack_log_s = now_s;
+        }
+
         bool rate_limited_active = (s_rate_limit_until_s > 0 && now_s < s_rate_limit_until_s);
         bool fetched = false;
 
+        fng_snapshot_t fng_snapshot = {0};
+        fng_service_get_snapshot(&fng_snapshot);
+        uint32_t metrics_interval_s = dashboard_metrics_interval_s_for_snapshot(&fng_snapshot);
+
         bool metrics_due = (s_last_dashboard_metrics_fetch_s == 0) ||
-                   ((now_s - s_last_dashboard_metrics_fetch_s) >= 3600);
+                   ((now_s - s_last_dashboard_metrics_fetch_s) >= (int64_t)metrics_interval_s);
         if (metrics_due) {
-            (void)fng_service_refresh(3600);
+            (void)fng_service_refresh(metrics_interval_s);
             s_last_dashboard_metrics_fetch_s = now_s;
-            if (display_driver_lock(200)) {
-                ui_dashboard_refresh();
-                display_driver_unlock();
-            }
+            ui_request_dashboard_refresh();
         }
 
         if (s_state->watchlist_count == 0) {
@@ -153,10 +227,7 @@ static void refresh_task(void *arg)
                 wifi_manager_get_state(&wifi_loop_state, &rssi);
 
                 if (now_loop_s - s_last_header_update_s >= 2) {
-                    if (display_driver_lock(100)) {
-                        ui_home_update_header(wifi_loop_state, rssi, age_s, offline, rate_limited);
-                        display_driver_unlock();
-                    }
+                    ui_request_home_header_update(wifi_loop_state, rssi, age_s, offline, rate_limited);
                     s_last_header_update_s = now_loop_s;
                 }
 
@@ -174,12 +245,22 @@ static void refresh_task(void *arg)
                 err = kraken_client_fetch_prices(s_state, &any_missing);
                 if (err == ESP_OK) {
                     failures = 0;
+                    s_network_error_streak = 0;
                     last_success = esp_timer_get_time();
+                    s_last_market_success_us = last_success;
                     s_last_market_fetch_s = now_s;
                     fetched = true;
                     kraken_ok = true;
                 } else {
                     failures++;
+                    if (is_network_fetch_error(err)) {
+                        s_network_error_streak++;
+                        if (s_network_error_streak >= 3) {
+                            ESP_LOGW(TAG, "Repeated network fetch failures; requesting Wi-Fi reconnect");
+                            (void)wifi_manager_reconnect();
+                            s_network_error_streak = 0;
+                        }
+                    }
                     ESP_LOGW(TAG, "Kraken refresh failed: %d", err);
                 }
             }
@@ -191,24 +272,41 @@ static void refresh_task(void *arg)
                         s_last_coingecko_fetch_s = now_s;
                         fetched = true;
                     } else {
+                        if (cg_err == ESP_ERR_TIMEOUT) {
+                            s_rate_limit_until_s = now_s + 300;
+                            rate_limited_active = true;
+                            s_last_coingecko_fetch_s = now_s;
+                            ESP_LOGW(TAG, "CoinGecko percent sync rate limited: backing off for 300s");
+                        } else if (is_network_fetch_error(cg_err)) {
+                            s_last_coingecko_fetch_s = now_s;
+                        }
                         ESP_LOGW(TAG, "CoinGecko percent sync failed: %d", cg_err);
                     }
                 }
             }
 
-            if ((any_missing || err != ESP_OK) && !rate_limited_active) {
-                if (s_last_coingecko_fetch_s == 0 || (now_s - s_last_coingecko_fetch_s) >= 60) {
+            bool need_price_backfill = !all_held_assets_priced(s_state);
+            if ((any_missing || err != ESP_OK || need_price_backfill) && !rate_limited_active) {
+                bool coingecko_due = need_price_backfill ||
+                                     (s_last_coingecko_fetch_s == 0) ||
+                                     ((now_s - s_last_coingecko_fetch_s) >= 60);
+                if (coingecko_due) {
                     esp_err_t cg_err = coingecko_client_fetch_markets_mode(s_state, true);
                     if (cg_err == ESP_OK) {
                         s_last_coingecko_fetch_s = now_s;
                         s_rate_limit_until_s = 0;
                         rate_limited_active = false;
+                        s_network_error_streak = 0;
                         fetched = true;
                     } else {
+                        if (is_network_fetch_error(cg_err)) {
+                            s_network_error_streak++;
+                            s_last_coingecko_fetch_s = now_s;
+                        }
                         if (cg_err == ESP_ERR_TIMEOUT) {
-                            s_rate_limit_until_s = now_s + 120;
+                            s_rate_limit_until_s = now_s + 300;
                             rate_limited_active = true;
-                            ESP_LOGW(TAG, "Rate limited: backing off for 120s");
+                            ESP_LOGW(TAG, "Rate limited: backing off for 300s");
                         }
                         ESP_LOGW(TAG, "CoinGecko fallback failed: %d", cg_err);
                     }
@@ -225,7 +323,9 @@ static void refresh_task(void *arg)
                 esp_err_t err = coingecko_client_fetch_markets(s_state);
                 if (err == ESP_OK) {
                     failures = 0;
+                    s_network_error_streak = 0;
                     last_success = esp_timer_get_time();
+                    s_last_market_success_us = last_success;
                     s_last_market_fetch_s = now_s;
                     s_last_coingecko_fetch_s = now_s;
                     s_rate_limit_until_s = 0;
@@ -233,13 +333,21 @@ static void refresh_task(void *arg)
                     fetched = true;
                 } else {
                     failures++;
+                    if (is_network_fetch_error(err)) {
+                        s_network_error_streak++;
+                        if (s_network_error_streak >= 3) {
+                            ESP_LOGW(TAG, "Repeated network fetch failures; requesting Wi-Fi reconnect");
+                            (void)wifi_manager_reconnect();
+                            s_network_error_streak = 0;
+                        }
+                    }
                     if (err == ESP_ERR_TIMEOUT) {
                         if (failures < 3) {
                             failures = 3;
                         }
-                        s_rate_limit_until_s = now_s + 120;
+                        s_rate_limit_until_s = now_s + 300;
                         rate_limited_active = true;
-                        ESP_LOGW(TAG, "Rate limited: backing off for 120s");
+                        ESP_LOGW(TAG, "Rate limited: backing off for 300s");
                     }
                     ESP_LOGW(TAG, "Market refresh failed: %d", err);
                 }
@@ -247,21 +355,25 @@ static void refresh_task(void *arg)
         }
 
         if (fetched) {
+            bool first_market_success = !s_market_fetch_succeeded_once;
+            s_market_fetch_succeeded_once = true;
+            if (!s_portfolio_data_ready && s_market_fetch_succeeded_once && all_held_assets_priced(s_state)) {
+                s_portfolio_data_ready = true;
+            }
+
             bool changed = market_data_changed(s_state);
-            if (changed && (now_s - s_last_ui_refresh_s) >= 5) {
-                if (display_driver_lock(200)) {
-                    ui_home_refresh();
-                    ui_dashboard_refresh();
-                    display_driver_unlock();
-                }
+            if (first_market_success) {
+                ui_request_home_refresh();
+                ui_request_dashboard_refresh();
+                s_last_ui_refresh_s = now_s;
+            } else if (changed && (now_s - s_last_ui_refresh_s) >= 5) {
+                ui_request_home_refresh();
+                ui_request_dashboard_refresh();
                 s_last_ui_refresh_s = now_s;
             }
             alert_manager_check();
-            if (display_driver_lock(200)) {
-                ui_alerts_refresh();
-                ui_dashboard_refresh();
-                display_driver_unlock();
-            }
+            ui_request_alerts_refresh();
+            ui_request_coin_detail_refresh();
         }
 
 #if CT_SPARKLINE_ENABLE
@@ -272,10 +384,7 @@ static void refresh_task(void *arg)
                 size_t count = 0;
                 if (coingecko_client_get_chart(s_state->watchlist[idx].id, 1, &points, &count) == ESP_OK) {
                     if ((now_s - s_last_ui_refresh_s) >= 5) {
-                        if (display_driver_lock(200)) {
-                            ui_home_refresh();
-                            display_driver_unlock();
-                        }
+                        ui_request_home_refresh();
                         s_last_ui_refresh_s = now_s;
                     }
                 }
@@ -296,10 +405,7 @@ static void refresh_task(void *arg)
             wifi_manager_get_state(&wifi_state, &rssi);
 
             if (now_s - s_last_header_update_s >= 2) {
-                if (display_driver_lock(100)) {
-                    ui_home_update_header(wifi_state, rssi, age_s, offline, rate_limited);
-                    display_driver_unlock();
-                }
+                ui_request_home_header_update(wifi_state, rssi, age_s, offline, rate_limited);
                 s_last_header_update_s = now_s;
             }
 
@@ -317,8 +423,24 @@ esp_err_t scheduler_init(app_state_t *state)
 #endif
     s_state = state;
     s_last_dashboard_metrics_fetch_s = 0;
+    s_ready_watchlist_count = state ? state->watchlist_count : 0;
+    s_market_fetch_succeeded_once = false;
+    s_portfolio_data_ready = false;
+    s_last_market_success_us = 0;
+
+    int64_t now_s = esp_timer_get_time() / 1000000;
+    fng_snapshot_t snapshot = {0};
+    fng_service_get_snapshot(&snapshot);
+    uint32_t metrics_interval_s = dashboard_metrics_interval_s_for_snapshot(&snapshot);
+    if (snapshot.fetched_at_s > 0 && now_s >= snapshot.fetched_at_s) {
+        int64_t age_s = now_s - snapshot.fetched_at_s;
+        if (age_s >= 0 && age_s < (int64_t)metrics_interval_s) {
+            s_last_dashboard_metrics_fetch_s = snapshot.fetched_at_s;
+        }
+    }
+
     if (!s_task) {
-        xTaskCreate(refresh_task, "ct_refresh", 6144, NULL, 3, &s_task);
+        xTaskCreate(refresh_task, "ct_refresh", 10240, NULL, 3, &s_task);
     }
     ESP_LOGI(TAG, "Scheduler started");
     return ESP_OK;
@@ -328,4 +450,31 @@ void scheduler_set_paused(bool paused)
 {
     s_paused = paused;
     ESP_LOGI(TAG, "Scheduler %s", paused ? "paused" : "resumed");
+}
+
+bool scheduler_is_portfolio_data_ready(void)
+{
+    return s_portfolio_data_ready;
+}
+
+uint32_t scheduler_get_last_market_update_age_s(void)
+{
+    int64_t last_us = s_last_market_success_us;
+    if (last_us <= 0) {
+        return UINT32_MAX;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (now_us <= last_us) {
+        return 0;
+    }
+
+    int64_t age_s = (now_us - last_us) / 1000000;
+    if (age_s < 0) {
+        return 0;
+    }
+    if (age_s > (int64_t)UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)age_s;
 }

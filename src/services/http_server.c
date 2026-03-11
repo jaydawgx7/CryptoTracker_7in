@@ -11,6 +11,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "services/app_state_guard.h"
+#include "services/display_driver.h"
 #include "services/screenshot.h"
 #include "services/nvs_store.h"
 #include "services/ota_update.h"
@@ -157,7 +159,13 @@ static esp_err_t handle_watchlist_get(httpd_req_t *req)
         return httpd_resp_send(req, "State unavailable", HTTPD_RESP_USE_STRLEN);
     }
 
+    if (!app_state_guard_lock(250)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_send(req, "State busy", HTTPD_RESP_USE_STRLEN);
+    }
+
     cJSON *array = watchlist_to_json(s_state);
+    app_state_guard_unlock();
     if (!array) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON alloc failed");
     }
@@ -215,16 +223,25 @@ static esp_err_t handle_watchlist_post(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
     }
 
+    if (!app_state_guard_lock(250)) {
+        cJSON_Delete(array);
+        free(body);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_send(req, "State busy", HTTPD_RESP_USE_STRLEN);
+    }
+
     bool ok = json_to_watchlist(s_state, array);
     cJSON_Delete(array);
     free(body);
     if (!ok) {
+        app_state_guard_unlock();
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid watchlist");
     }
 
     s_state->needs_restore = false;
 
     esp_err_t save_err = nvs_store_save_app_state(s_state);
+    app_state_guard_unlock();
     if (save_err != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Save failed");
     }
@@ -323,6 +340,8 @@ static esp_err_t handle_screenshot(httpd_req_t *req)
     }
     s_last_shot_ms = now_ms;
 
+    (void)display_driver_capture_screenshot();
+
     uint16_t width = 0;
     uint16_t height = 0;
     if (!screenshot_get_size(&width, &height)) {
@@ -364,8 +383,15 @@ static esp_err_t handle_screenshot(httpd_req_t *req)
         return ESP_ERR_NO_MEM;
     }
 
+    if (!screenshot_lock(250)) {
+        free(row_pixels);
+        free(row_buf);
+        httpd_resp_send_chunk(req, NULL, 0);
+        return ESP_ERR_TIMEOUT;
+    }
+
     for (uint16_t y = 0; y < height; y++) {
-        if (!screenshot_read_row(y, row_pixels, width)) {
+        if (!screenshot_read_row_locked(y, row_pixels, width)) {
             err = ESP_FAIL;
             break;
         }
@@ -404,6 +430,8 @@ static esp_err_t handle_screenshot(httpd_req_t *req)
             break;
         }
     }
+
+    screenshot_unlock();
 
     free(row_pixels);
     free(row_buf);

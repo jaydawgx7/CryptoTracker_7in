@@ -33,9 +33,10 @@ static const char *TAG = "fng_service";
 #define CMC_RATE_LIMIT_BACKOFF_S 3600
 #define CMC_CONNECT_BACKOFF_S 600
 #define CMC_GENERIC_BACKOFF_S 900
+#define FNG_STALE_AFTER_S 3600
 #define FNG_PERSIST_NAMESPACE "ct"
-#define FNG_PERSIST_KEY "fng_cache_v1"
-#define FNG_PERSIST_MAGIC 0x31474E46u
+#define FNG_PERSIST_KEY "fng_cache_v2"
+#define FNG_PERSIST_MAGIC 0x32474E46u
 
 typedef struct {
     uint32_t magic;
@@ -60,9 +61,11 @@ static fng_snapshot_t s_snapshot = {
     .btc_dominance = 0.0,
     .has_eth_dominance = false,
     .eth_dominance = 0.0,
+    .market_metrics_stale = false,
     .has_total_market_cap = false,
     .total_market_cap = 0.0,
     .total_market_cap_change_24h = 0.0,
+    .btc_price_stale = false,
     .has_btc_price = false,
     .btc_price = 0.0,
     .btc_price_change_24h = 0.0,
@@ -81,6 +84,24 @@ static int64_t s_last_attempt_s = 0;
 static int64_t s_last_cmc_fng_attempt_s = 0;
 static int64_t s_cmc_rate_limit_until_s = 0;
 static uint32_t s_cmc_fng_attempt_count = 0;
+
+static bool snapshot_value_is_stale(int64_t now_s)
+{
+    if (!s_snapshot.has_value || s_snapshot.fetched_at_s <= 0) {
+        return true;
+    }
+
+    if (now_s <= s_snapshot.fetched_at_s) {
+        return false;
+    }
+
+    return (now_s - s_snapshot.fetched_at_s) >= FNG_STALE_AFTER_S;
+}
+
+static void update_snapshot_stale_flag(int64_t now_s)
+{
+    s_snapshot.stale = snapshot_value_is_stale(now_s);
+}
 
 static void persist_runtime_state(void)
 {
@@ -128,6 +149,7 @@ static void load_persisted_runtime_state(void)
     s_last_cmc_fng_attempt_s = blob.last_cmc_fng_attempt_s;
     s_cmc_rate_limit_until_s = blob.cmc_rate_limit_until_s;
     s_snapshot = blob.snapshot;
+    update_snapshot_stale_flag(esp_timer_get_time() / 1000000);
     ESP_LOGI(TAG,
              "Loaded persisted FNG state: has_value=%d fallback=%d last_attempt=%lld backoff_until=%lld",
              s_snapshot.has_value,
@@ -631,6 +653,7 @@ esp_err_t fng_service_refresh(uint32_t min_interval_s)
     }
 
     int64_t now_s = esp_timer_get_time() / 1000000;
+    update_snapshot_stale_flag(now_s);
     if (s_last_attempt_s > 0 && (now_s - s_last_attempt_s) < (int64_t)min_interval_s) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -686,7 +709,8 @@ esp_err_t fng_service_refresh(uint32_t min_interval_s)
         got_fng = (err == ESP_OK);
     }
 
-    if (!got_fng && (fng_attempted || CT_CMC_API_KEY[0] == '\0')) {
+    bool snapshot_missing_or_stale = snapshot_value_is_stale(now_s);
+    if (!got_fng && (fng_attempted || CT_CMC_API_KEY[0] == '\0' || snapshot_missing_or_stale)) {
         char *alt_json = NULL;
         esp_err_t alt_err = http_get_json(ALTME_FNG_URL, &alt_json);
         if (alt_err == ESP_OK) {
@@ -717,21 +741,42 @@ esp_err_t fng_service_refresh(uint32_t min_interval_s)
         s_snapshot.error = false;
         s_snapshot.using_fallback = used_fallback;
         s_snapshot.last_error = ESP_OK;
+        ESP_LOGI(TAG,
+                 "FNG updated: value=%d class=%s source=%s source_ts=%lld fetched_at=%lld age=%llds",
+                 s_snapshot.value,
+                 s_snapshot.classification,
+                 used_fallback ? "alternative.me" : "CMC",
+                 (long long)s_snapshot.source_ts_s,
+                 (long long)s_snapshot.fetched_at_s,
+                 (long long)s_snapshot.source_age_s_at_fetch);
         persist_runtime_state();
     } else if (fng_attempted) {
-        s_snapshot.has_value = false;
-        s_snapshot.value = 0;
-        s_snapshot.source_ts_s = 0;
-        s_snapshot.source_age_s_at_fetch = 0;
-        s_snapshot.fetched_at_s = 0;
+        bool had_cached_value = s_snapshot.has_value;
         s_snapshot.error = true;
-        s_snapshot.using_fallback = false;
-        s_snapshot.stale = false;
-        strncpy(s_snapshot.classification, "N/A", sizeof(s_snapshot.classification) - 1);
-        s_snapshot.classification[sizeof(s_snapshot.classification) - 1] = '\0';
         s_snapshot.last_error = err;
+        update_snapshot_stale_flag(now_s);
         persist_runtime_state();
+
+        if (had_cached_value) {
+            ESP_LOGW(TAG,
+                     "FNG refresh failed after CMC attempt: %s; preserving cached snapshot",
+                     esp_err_to_name(err));
+        } else {
+            s_snapshot.has_value = false;
+            s_snapshot.value = 0;
+            s_snapshot.source_ts_s = 0;
+            s_snapshot.source_age_s_at_fetch = 0;
+            s_snapshot.fetched_at_s = 0;
+            s_snapshot.using_fallback = false;
+            s_snapshot.stale = false;
+            strncpy(s_snapshot.classification, "N/A", sizeof(s_snapshot.classification) - 1);
+            s_snapshot.classification[sizeof(s_snapshot.classification) - 1] = '\0';
+            persist_runtime_state();
+            ESP_LOGW(TAG, "FNG refresh failed after CMC attempt: %s", esp_err_to_name(err));
+        }
     }
+
+    update_snapshot_stale_flag(now_s);
 
     char *global_json = NULL;
     double btc_dom = 0.0;
@@ -762,21 +807,19 @@ esp_err_t fng_service_refresh(uint32_t min_interval_s)
         s_snapshot.btc_dominance = btc_dom;
         s_snapshot.has_eth_dominance = true;
         s_snapshot.eth_dominance = eth_dom;
+        s_snapshot.market_metrics_stale = false;
         s_snapshot.has_total_market_cap = true;
         s_snapshot.total_market_cap = total_market_cap;
         s_snapshot.total_market_cap_change_24h = total_market_cap_change_24h;
         s_snapshot.btc_dominance_change_24h = btc_dom_chg;
         s_snapshot.eth_dominance_change_24h = eth_dom_chg;
     } else {
-        s_snapshot.has_btc_dominance = false;
-        s_snapshot.btc_dominance = 0.0;
-        s_snapshot.has_eth_dominance = false;
-        s_snapshot.eth_dominance = 0.0;
-        s_snapshot.has_total_market_cap = false;
-        s_snapshot.total_market_cap = 0.0;
-        s_snapshot.total_market_cap_change_24h = 0.0;
-        s_snapshot.btc_dominance_change_24h = 0.0;
-        s_snapshot.eth_dominance_change_24h = 0.0;
+        s_snapshot.market_metrics_stale = s_snapshot.has_btc_dominance ||
+                                         s_snapshot.has_eth_dominance ||
+                                         s_snapshot.has_total_market_cap;
+        ESP_LOGW(TAG,
+                 "Global metrics refresh failed: %s; preserving previous dashboard metrics",
+                 esp_err_to_name(global_err));
     }
 
     char *btc_json = NULL;
@@ -793,13 +836,15 @@ esp_err_t fng_service_refresh(uint32_t min_interval_s)
     }
 
     if (btc_err == ESP_OK) {
+        s_snapshot.btc_price_stale = false;
         s_snapshot.has_btc_price = true;
         s_snapshot.btc_price = btc_price;
         s_snapshot.btc_price_change_24h = btc_price_change_24h;
     } else {
-        s_snapshot.has_btc_price = false;
-        s_snapshot.btc_price = 0.0;
-        s_snapshot.btc_price_change_24h = 0.0;
+        s_snapshot.btc_price_stale = s_snapshot.has_btc_price;
+        ESP_LOGW(TAG,
+                 "BTC quote refresh failed: %s; preserving previous BTC quote",
+                 esp_err_to_name(btc_err));
     }
 
     s_snapshot.has_altcoin_season_index = false;
@@ -817,5 +862,7 @@ void fng_service_get_snapshot(fng_snapshot_t *out)
     if (!out) {
         return;
     }
+
+    update_snapshot_stale_flag(esp_timer_get_time() / 1000000);
     *out = s_snapshot;
 }

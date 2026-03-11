@@ -11,8 +11,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_timer.h"
+
+#include "services/app_state_guard.h"
 #include "services/coingecko_client.h"
 #include "services/display_driver.h"
+#include "services/scheduler.h"
 #include "ui/ui.h"
 #include "ui/ui_nav.h"
 #include "ui/ui_theme.h"
@@ -29,6 +33,9 @@ typedef enum {
 typedef struct {
     char coin_id[32];
     chart_range_t range;
+    chart_point_t *points;
+    size_t count;
+    esp_err_t result;
 } chart_task_ctx_t;
 
 #define CHIP_COUNT 5
@@ -55,6 +62,8 @@ static lv_obj_t *s_holdings = NULL;
 static lv_obj_t *s_chart = NULL;
 static lv_chart_series_t *s_series = NULL;
 static lv_obj_t *s_status = NULL;
+static lv_obj_t *s_footer_updated = NULL;
+static lv_timer_t *s_footer_timer = NULL;
 static lv_obj_t *s_range_buttons[RANGE_BUTTON_COUNT] = {0};
 static lv_obj_t *s_range_labels[RANGE_BUTTON_COUNT] = {0};
 static const chart_range_t s_range_order[RANGE_BUTTON_COUNT] = {RANGE_1H, RANGE_24H, RANGE_7D, RANGE_30D, RANGE_1Y};
@@ -65,8 +74,18 @@ static lv_obj_t *s_x_labels[X_LABEL_COUNT] = {0};
 static lv_obj_t *s_tooltip = NULL;
 static lv_obj_t *s_tooltip_label = NULL;
 static lv_obj_t *s_guideline = NULL;
+static chart_point_t *s_chart_storage = NULL;
 static const chart_point_t *s_chart_points = NULL;
 static size_t s_chart_count = 0;
+static int64_t s_chart_loaded_us = 0;
+static int64_t s_chart_request_started_us = 0;
+static char s_chart_coin_id[32] = {0};
+static chart_range_t s_chart_loaded_range = RANGE_24H;
+static bool s_chart_needs_render = true;
+static bool s_range_buttons_dirty = true;
+
+#define CHART_REFRESH_INTERVAL_US (60LL * 1000LL * 1000LL)
+#define CHART_REQUEST_RETRY_US (15LL * 1000LL * 1000LL)
 
 static lv_color_t percent_color(double change)
 {
@@ -81,6 +100,159 @@ static lv_color_t percent_color(double change)
 
 static void format_usd_price(double price, char *buf, size_t len);
 static void format_axis_price(double price, char *buf, size_t len);
+static int range_to_days(chart_range_t range);
+static void set_chart_data(const chart_point_t *points, size_t count);
+static void request_chart(void);
+
+static void set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (!label || !text) {
+        return;
+    }
+
+    const char *current = lv_label_get_text(label);
+    if (current && strcmp(current, text) == 0) {
+        return;
+    }
+
+    lv_label_set_text(label, text);
+}
+
+static void free_chart_points(chart_point_t *points)
+{
+    free(points);
+}
+
+static uint32_t detail_footer_update_period_ms(uint32_t age_s)
+{
+    if (age_s < 3600) {
+        return 1000;
+    }
+    return 60000;
+}
+
+static void clear_chart_cache(void)
+{
+    free_chart_points(s_chart_storage);
+    s_chart_storage = NULL;
+    s_chart_points = NULL;
+    s_chart_count = 0;
+    s_chart_loaded_us = 0;
+    s_chart_request_started_us = 0;
+    s_chart_coin_id[0] = '\0';
+    s_chart_loaded_range = RANGE_24H;
+    s_chart_needs_render = true;
+}
+
+static void adopt_chart_data(chart_point_t *points, size_t count, const char *coin_id, chart_range_t range)
+{
+    if (!points || count < 2 || !coin_id) {
+        return;
+    }
+
+    free_chart_points(s_chart_storage);
+    s_chart_storage = points;
+    s_chart_points = points;
+    s_chart_count = count;
+    s_chart_loaded_us = esp_timer_get_time();
+    s_chart_request_started_us = 0;
+    s_chart_loaded_range = range;
+    strncpy(s_chart_coin_id, coin_id, sizeof(s_chart_coin_id) - 1);
+    s_chart_coin_id[sizeof(s_chart_coin_id) - 1] = '\0';
+
+    set_chart_data(s_chart_storage, count);
+    s_chart_needs_render = false;
+    set_label_text_if_changed(s_status, "");
+}
+
+static bool load_chart_from_service_cache(const coin_t *coin)
+{
+    if (!coin) {
+        return false;
+    }
+
+    chart_point_t *points = NULL;
+    size_t count = 0;
+    if (coingecko_client_copy_chart(coin->id, range_to_days(s_range), &points, &count) != ESP_OK || !points || count < 2) {
+        free_chart_points(points);
+        return false;
+    }
+
+    adopt_chart_data(points, count, coin->id, s_range);
+    return true;
+}
+
+static bool chart_matches_current_target(const chart_task_ctx_t *ctx)
+{
+    if (!ctx || !s_state || s_coin_index >= s_state->watchlist_count) {
+        return false;
+    }
+
+    const coin_t *coin = &s_state->watchlist[s_coin_index];
+    return strcmp(ctx->coin_id, coin->id) == 0 && ctx->range == s_range;
+}
+
+static bool chart_is_current_for(const coin_t *coin)
+{
+    if (!coin || !s_chart_storage || !s_chart_points || s_chart_count == 0) {
+        return false;
+    }
+
+    return strcmp(s_chart_coin_id, coin->id) == 0 && s_chart_loaded_range == s_range;
+}
+
+static bool chart_is_fresh(void)
+{
+    if (s_chart_loaded_us <= 0) {
+        return false;
+    }
+
+    int64_t age_us = esp_timer_get_time() - s_chart_loaded_us;
+    return age_us >= 0 && age_us < CHART_REFRESH_INTERVAL_US;
+}
+
+static void update_footer_age_label(void)
+{
+    if (!s_footer_updated) {
+        return;
+    }
+
+    uint32_t age_s = scheduler_get_last_market_update_age_s();
+    if (age_s == UINT32_MAX) {
+        set_label_text_if_changed(s_footer_updated, "Updated: --");
+        if (s_footer_timer) {
+            lv_timer_set_period(s_footer_timer, 10000);
+        }
+        return;
+    }
+
+    char text[48];
+    if (age_s >= 3600) {
+        uint32_t hours = age_s / 3600;
+        uint32_t minutes = (age_s % 3600) / 60;
+        snprintf(text, sizeof(text), "Updated: %uh%um ago", (unsigned)hours, (unsigned)minutes);
+    } else if (age_s >= 60) {
+        uint32_t minutes = age_s / 60;
+        uint32_t seconds = age_s % 60;
+        snprintf(text, sizeof(text), "Updated: %um%us ago", (unsigned)minutes, (unsigned)seconds);
+    } else {
+        snprintf(text, sizeof(text), "Updated: %us ago", (unsigned)age_s);
+    }
+
+    set_label_text_if_changed(s_footer_updated, text);
+    if (s_footer_timer) {
+        lv_timer_set_period(s_footer_timer, detail_footer_update_period_ms(age_s));
+    }
+}
+
+static void footer_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_screen || !lv_obj_is_valid(s_screen) || lv_scr_act() != s_screen) {
+        return;
+    }
+    update_footer_age_label();
+}
 
 static void format_trim_zeros(char *buf)
 {
@@ -181,7 +353,7 @@ static void update_axis_labels(double min, double max)
         double t = (double)i / (double)(Y_LABEL_COUNT - 1);
         double value = max - ((max - min) * t);
         format_axis_price(value, price, sizeof(price));
-        lv_label_set_text(s_y_labels[i], price);
+        set_label_text_if_changed(s_y_labels[i], price);
     }
 
     char timebuf[24];
@@ -191,7 +363,7 @@ static void update_axis_labels(double min, double max)
             idx = (size_t)((i * (s_chart_count - 1)) / (X_LABEL_COUNT - 1));
         }
         format_time_label(s_chart_points[idx].ts_ms, timebuf, sizeof(timebuf));
-        lv_label_set_text(s_x_labels[i], timebuf);
+        set_label_text_if_changed(s_x_labels[i], timebuf);
     }
 
     lv_coord_t axis_h = lv_obj_get_height(s_y_axis);
@@ -226,7 +398,7 @@ static void update_chip(int index, double change)
 
     char text[16];
     format_percent(change, text, sizeof(text));
-    lv_label_set_text(s_chip_labels[index], text);
+    set_label_text_if_changed(s_chip_labels[index], text);
 
     lv_color_t color = percent_color(change);
     lv_obj_set_style_text_color(s_chip_labels[index], color, 0);
@@ -398,7 +570,7 @@ static void update_header_values(void)
 
     char title[96];
     snprintf(title, sizeof(title), "%s (%s) | %s", coin->name, coin->symbol, price);
-    lv_label_set_text(s_title, title);
+    set_label_text_if_changed(s_title, title);
 
     update_chip(0, coin->change_1h);
     update_chip(1, coin->change_24h);
@@ -420,7 +592,7 @@ static void update_header_values(void)
     } else {
         snprintf(holdings_line, sizeof(holdings_line), "Holdings: -- | $--.--");
     }
-    lv_label_set_text(s_holdings, holdings_line);
+    set_label_text_if_changed(s_holdings, holdings_line);
 }
 
 static int range_to_days(chart_range_t range)
@@ -441,6 +613,10 @@ static int range_to_days(chart_range_t range)
 
 static void update_range_buttons(void)
 {
+    if (!s_range_buttons_dirty) {
+        return;
+    }
+
     const ui_theme_colors_t *theme = ui_theme_get();
     uint32_t active_bg = theme ? theme->nav_active_bg : 0x2A3142;
     uint32_t inactive_bg = theme ? theme->nav_inactive_bg : 0x151A24;
@@ -457,6 +633,8 @@ static void update_range_buttons(void)
             lv_obj_set_style_text_color(s_range_labels[i], active ? lv_color_hex(active_text) : lv_color_hex(inactive_text), 0);
         }
     }
+
+    s_range_buttons_dirty = false;
 }
 
 static void show_tooltip(size_t index)
@@ -619,26 +797,29 @@ static void chart_ready_cb(void *arg)
     }
 
     if (!s_state || s_coin_index >= s_state->watchlist_count) {
+        s_loading = false;
+        free_chart_points(ctx->points);
         free(ctx);
         return;
     }
 
-    const coin_t *coin = &s_state->watchlist[s_coin_index];
-    if (strcmp(ctx->coin_id, coin->id) != 0 || ctx->range != s_range) {
+    if (!chart_matches_current_target(ctx)) {
+        s_loading = false;
+        free_chart_points(ctx->points);
         free(ctx);
+        request_chart();
         return;
     }
 
-    const chart_point_t *points = NULL;
-    size_t count = 0;
-    if (coingecko_client_get_chart(ctx->coin_id, range_to_days(ctx->range), &points, &count) == ESP_OK) {
-        set_chart_data(points, count);
-        lv_label_set_text(s_status, "");
+    if (ctx->result == ESP_OK && ctx->points && ctx->count > 1) {
+        adopt_chart_data(ctx->points, ctx->count, ctx->coin_id, ctx->range);
+        ctx->points = NULL;
     } else {
-        lv_label_set_text(s_status, "Chart load failed");
+        set_label_text_if_changed(s_status, "Chart load failed");
     }
 
     s_loading = false;
+    free_chart_points(ctx->points);
     free(ctx);
 }
 
@@ -650,9 +831,7 @@ static void chart_task(void *arg)
         return;
     }
 
-    const chart_point_t *points = NULL;
-    size_t count = 0;
-    coingecko_client_get_chart(ctx->coin_id, range_to_days(ctx->range), &points, &count);
+    ctx->result = coingecko_client_copy_chart(ctx->coin_id, range_to_days(ctx->range), &ctx->points, &ctx->count);
     lv_async_call(chart_ready_cb, ctx);
     vTaskDelete(NULL);
 }
@@ -664,6 +843,24 @@ static void request_chart(void)
     }
 
     const coin_t *coin = &s_state->watchlist[s_coin_index];
+    if (chart_is_current_for(coin) && chart_is_fresh()) {
+        if (s_chart_needs_render) {
+            set_chart_data(s_chart_points, s_chart_count);
+            s_chart_needs_render = false;
+        }
+        set_label_text_if_changed(s_status, "");
+        return;
+    }
+
+    if (load_chart_from_service_cache(coin)) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (s_chart_request_started_us > 0 && (now_us - s_chart_request_started_us) < CHART_REQUEST_RETRY_US) {
+        return;
+    }
+
     chart_task_ctx_t *ctx = calloc(1, sizeof(chart_task_ctx_t));
     if (!ctx) {
         return;
@@ -672,9 +869,15 @@ static void request_chart(void)
     strncpy(ctx->coin_id, coin->id, sizeof(ctx->coin_id) - 1);
     ctx->range = s_range;
     s_loading = true;
-    lv_label_set_text(s_status, "Loading chart...");
+    s_chart_request_started_us = now_us;
+    set_label_text_if_changed(s_status, "Loading chart...");
 
-    xTaskCreate(chart_task, "chart_fetch", 6144, ctx, 5, NULL);
+    BaseType_t ok = xTaskCreate(chart_task, "chart_fetch", 6144, ctx, 5, NULL);
+    if (ok != pdPASS) {
+        s_loading = false;
+        set_label_text_if_changed(s_status, "Chart task failed");
+        free(ctx);
+    }
 }
 
 static void range_event(lv_event_t *e)
@@ -684,6 +887,9 @@ static void range_event(lv_event_t *e)
         return;
     }
     s_range = range;
+    s_chart_needs_render = true;
+    s_range_buttons_dirty = true;
+    hide_tooltip();
     update_range_buttons();
     request_chart();
 }
@@ -695,10 +901,42 @@ void ui_coin_detail_set_state(app_state_t *state)
 
 void ui_coin_detail_show_index(size_t index)
 {
+    bool coin_changed = true;
+    if (s_state && index < s_state->watchlist_count) {
+        const coin_t *coin = &s_state->watchlist[index];
+        coin_changed = strcmp(s_chart_coin_id, coin->id) != 0;
+    }
+
     s_coin_index = index;
+    if (coin_changed) {
+        hide_tooltip();
+        clear_chart_cache();
+    }
     update_header_values();
     update_range_buttons();
     request_chart();
+    update_footer_age_label();
+}
+
+void ui_coin_detail_refresh_if_active(void)
+{
+    if (!s_screen || !lv_obj_is_valid(s_screen) || lv_scr_act() != s_screen) {
+        return;
+    }
+
+    if (!app_state_guard_lock(250)) {
+        return;
+    }
+
+    if (!s_state || s_coin_index >= s_state->watchlist_count) {
+        app_state_guard_unlock();
+        return;
+    }
+
+    update_header_values();
+    request_chart();
+    update_footer_age_label();
+    app_state_guard_unlock();
 }
 
 lv_obj_t *ui_coin_detail_screen_create(void)
@@ -832,6 +1070,21 @@ lv_obj_t *ui_coin_detail_screen_create(void)
     lv_obj_set_style_text_color(s_status, lv_color_hex(0x9AA1AD), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 16, 338);
 
+    s_footer_updated = lv_label_create(s_screen);
+    lv_label_set_text(s_footer_updated, "Updated: --");
+    lv_obj_set_style_text_color(s_footer_updated, lv_color_hex(0x9AA1AD), 0);
+    lv_obj_set_width(s_footer_updated, 760);
+    lv_obj_set_style_text_align(s_footer_updated, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_footer_updated, LV_ALIGN_BOTTOM_RIGHT, -16, -8);
+
+    if (s_footer_timer) {
+        lv_timer_del(s_footer_timer);
+        s_footer_timer = NULL;
+    }
+    s_footer_timer = lv_timer_create(footer_timer_cb, 5000, NULL);
+    s_chart_needs_render = true;
+    s_range_buttons_dirty = true;
+
     lv_obj_t *range_bar = lv_obj_create(s_screen);
     lv_obj_set_size(range_bar, 700, 40);
     lv_obj_align(range_bar, LV_ALIGN_TOP_MID, 0, 360);
@@ -864,6 +1117,7 @@ lv_obj_t *ui_coin_detail_screen_create(void)
     lv_obj_move_foreground(s_title);
     lv_obj_move_foreground(s_holdings);
     update_range_buttons();
+    update_footer_age_label();
     hide_tooltip();
     return s_screen;
 }

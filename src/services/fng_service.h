@@ -15,9 +15,11 @@ typedef struct {
     double btc_dominance;
     bool has_eth_dominance;
     double eth_dominance;
+    bool market_metrics_stale;
     bool has_total_market_cap;
     double total_market_cap;
     double total_market_cap_change_24h;
+    bool btc_price_stale;
     bool has_btc_price;
     double btc_price;
     double btc_price_change_24h;

@@ -11,6 +11,8 @@
 #include "ui/ui_theme.h"
 #include "services/touch_driver.h"
 
+#include <string.h>
+
 #ifndef CT_UI_MINIMAL
 #define CT_UI_MINIMAL 0
 #endif
@@ -34,6 +36,25 @@ static lv_obj_t *s_coin_detail_screen = NULL;
 static lv_obj_t *s_touch_cal_screen = NULL;
 static const app_state_t *s_app_state = NULL;
 static bool s_theme_rebuild_pending = false;
+
+typedef enum {
+    UI_PENDING_NONE = 0,
+    UI_PENDING_HOME_HEADER = 1 << 0,
+    UI_PENDING_HOME_REFRESH = 1 << 1,
+    UI_PENDING_DASHBOARD_REFRESH = 1 << 2,
+    UI_PENDING_ALERTS_REFRESH = 1 << 3,
+    UI_PENDING_COIN_DETAIL_REFRESH = 1 << 4,
+    UI_PENDING_ALERT_TOAST = 1 << 5,
+} ui_pending_flags_t;
+
+static portMUX_TYPE s_pending_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t s_pending_flags = UI_PENDING_NONE;
+static wifi_state_t s_pending_wifi_state = WIFI_STATE_DISCONNECTED;
+static int s_pending_rssi = 0;
+static uint32_t s_pending_updated_age_s = 0;
+static bool s_pending_offline = false;
+static bool s_pending_rate_limited = false;
+static char s_pending_toast[64] = {0};
 #if CT_UI_TOUCH_DEBUG
 static lv_obj_t *s_touch_indicator = NULL;
 static lv_timer_t *s_touch_timer = NULL;
@@ -44,7 +65,11 @@ static void load_screen(lv_obj_t *screen)
     if (!screen) {
         return;
     }
-    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+    if (lv_scr_act() == screen) {
+        return;
+    }
+    lv_obj_update_layout(screen);
+    lv_scr_load(screen);
 }
 
 static void apply_state_to_screens(const app_state_t *state)
@@ -103,7 +128,7 @@ static void rebuild_screens(void)
     s_add_coin_screen = ui_add_coin_screen_create();
     s_alerts_screen = ui_alerts_screen_create();
     s_coin_detail_screen = ui_coin_detail_screen_create();
-    s_touch_cal_screen = ui_touch_cal_screen_create();
+    s_touch_cal_screen = show_touch_cal ? ui_touch_cal_screen_create() : NULL;
 #endif
 
 #if CT_UI_BORDER_DEBUG
@@ -226,7 +251,16 @@ void ui_init(void)
         return;
     }
 
-    ui_theme_init(true);
+    bool dark_mode = true;
+    if (s_app_state) {
+        dark_mode = s_app_state->prefs.dark_mode;
+        ui_theme_set_accent(s_app_state->prefs.accent_hex);
+        ui_theme_set_shadow_color(s_app_state->prefs.shadow_hex);
+        ui_theme_set_shadow_strength((uint8_t)s_app_state->prefs.button_shadow_strength);
+        ui_theme_set_buttons_3d(s_app_state->prefs.buttons_3d);
+    }
+    ui_theme_set_dark_mode(dark_mode);
+    ui_theme_init(dark_mode);
 
     s_home_screen = ui_home_screen_create();
     s_dashboard_screen = ui_dashboard_screen_create();
@@ -235,7 +269,7 @@ void ui_init(void)
     s_add_coin_screen = ui_add_coin_screen_create();
     s_alerts_screen = ui_alerts_screen_create();
     s_coin_detail_screen = ui_coin_detail_screen_create();
-    s_touch_cal_screen = ui_touch_cal_screen_create();
+    s_touch_cal_screen = NULL;
 #endif
 
 #if CT_UI_BORDER_DEBUG
@@ -262,16 +296,16 @@ void ui_init(void)
 void ui_show_home(void)
 {
     rebuild_if_pending();
+    ui_home_prepare_for_show();
     load_screen(s_home_screen);
-    ui_home_refresh();
 }
 
 void ui_show_dashboard(void)
 {
     rebuild_if_pending();
     if (s_dashboard_screen) {
+        ui_dashboard_prepare_for_show();
         load_screen(s_dashboard_screen);
-        ui_dashboard_refresh();
     }
 }
 
@@ -335,8 +369,8 @@ void ui_show_add_coin(void)
 void ui_show_alerts(void)
 {
     rebuild_if_pending();
+    ui_alerts_prepare_for_show();
     load_screen(s_alerts_screen);
-    ui_alerts_refresh();
 }
 
 void ui_show_coin_detail(size_t index)
@@ -361,4 +395,103 @@ void ui_show_touch_calibration(void)
         s_touch_cal_screen = ui_touch_cal_screen_create();
     }
     load_screen(s_touch_cal_screen);
+}
+
+void ui_request_home_header_update(wifi_state_t wifi_state, int rssi, uint32_t updated_age_s, bool offline, bool rate_limited)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    s_pending_wifi_state = wifi_state;
+    s_pending_rssi = rssi;
+    s_pending_updated_age_s = updated_age_s;
+    s_pending_offline = offline;
+    s_pending_rate_limited = rate_limited;
+    s_pending_flags |= UI_PENDING_HOME_HEADER;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_request_home_refresh(void)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    s_pending_flags |= UI_PENDING_HOME_REFRESH;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_request_dashboard_refresh(void)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    s_pending_flags |= UI_PENDING_DASHBOARD_REFRESH;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_request_alerts_refresh(void)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    s_pending_flags |= UI_PENDING_ALERTS_REFRESH;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_request_coin_detail_refresh(void)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    s_pending_flags |= UI_PENDING_COIN_DETAIL_REFRESH;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_request_alert_toast(const char *text)
+{
+    taskENTER_CRITICAL(&s_pending_mux);
+    if (text) {
+        strncpy(s_pending_toast, text, sizeof(s_pending_toast) - 1);
+        s_pending_toast[sizeof(s_pending_toast) - 1] = '\0';
+    } else {
+        s_pending_toast[0] = '\0';
+    }
+    s_pending_flags |= UI_PENDING_ALERT_TOAST;
+    taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+void ui_process_pending(void)
+{
+    uint32_t pending = UI_PENDING_NONE;
+    wifi_state_t wifi_state = WIFI_STATE_DISCONNECTED;
+    int rssi = 0;
+    uint32_t updated_age_s = 0;
+    bool offline = false;
+    bool rate_limited = false;
+    char toast[sizeof(s_pending_toast)] = {0};
+
+    taskENTER_CRITICAL(&s_pending_mux);
+    pending = s_pending_flags;
+    if (pending == UI_PENDING_NONE) {
+        taskEXIT_CRITICAL(&s_pending_mux);
+        return;
+    }
+
+    wifi_state = s_pending_wifi_state;
+    rssi = s_pending_rssi;
+    updated_age_s = s_pending_updated_age_s;
+    offline = s_pending_offline;
+    rate_limited = s_pending_rate_limited;
+    strncpy(toast, s_pending_toast, sizeof(toast) - 1);
+    s_pending_flags = UI_PENDING_NONE;
+    taskEXIT_CRITICAL(&s_pending_mux);
+
+    if (pending & UI_PENDING_HOME_HEADER) {
+        ui_home_update_header(wifi_state, rssi, updated_age_s, offline, rate_limited);
+    }
+    if (pending & UI_PENDING_HOME_REFRESH) {
+        ui_home_refresh();
+    }
+    if (pending & UI_PENDING_DASHBOARD_REFRESH) {
+        ui_dashboard_refresh();
+    }
+    if (pending & UI_PENDING_ALERTS_REFRESH) {
+        ui_alerts_refresh();
+    }
+    if (pending & UI_PENDING_COIN_DETAIL_REFRESH) {
+        ui_coin_detail_refresh_if_active();
+    }
+    if ((pending & UI_PENDING_ALERT_TOAST) && toast[0] != '\0') {
+        ui_alerts_show_toast(toast);
+    }
 }

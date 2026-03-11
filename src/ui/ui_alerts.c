@@ -74,9 +74,12 @@ void ui_alerts_show_toast(const char *text)
     s_toast_timer = lv_timer_create(toast_hide_cb, 1800, NULL);
 }
 
-void ui_alerts_refresh(void)
+static void refresh_alerts_internal(bool require_active)
 {
-    if (!s_screen || lv_scr_act() != s_screen) {
+    if (!s_screen) {
+        return;
+    }
+    if (require_active && lv_scr_act() != s_screen) {
         return;
     }
     if (!s_active_list || !s_log_list) {
@@ -130,6 +133,16 @@ void ui_alerts_refresh(void)
             build_list_item(s_log_list, line, lv_color_hex(0xE6E6E6));
         }
     }
+}
+
+void ui_alerts_refresh(void)
+{
+    refresh_alerts_internal(true);
+}
+
+void ui_alerts_prepare_for_show(void)
+{
+    refresh_alerts_internal(false);
 }
 
 lv_obj_t *ui_alerts_screen_create(void)

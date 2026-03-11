@@ -430,3 +430,29 @@ esp_err_t wifi_manager_forget_network(const char *ssid)
     sort_networks();
     return ESP_OK;
 }
+
+esp_err_t wifi_manager_reconnect(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_state_t prev_state = s_state;
+    s_state = WIFI_STATE_CONNECTING;
+    s_rssi = 0;
+
+    esp_err_t err = esp_wifi_disconnect();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_CONNECT) {
+        s_state = prev_state;
+        return err;
+    }
+
+    if (s_current_index >= 0 && (size_t)s_current_index < s_network_count) {
+        connect_to_index(s_current_index);
+    } else {
+        connect_next();
+    }
+
+    ESP_LOGW(TAG, "WiFi reconnect requested");
+    return ESP_OK;
+}

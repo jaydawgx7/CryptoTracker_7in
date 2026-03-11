@@ -80,6 +80,138 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (release validate)",
+			"type": "shell",
+			"command": "C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"esp32-s3-devkitc-1-release"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release validate concise",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_validate.log'; if ($LASTEXITCODE -eq 0) { Write-Output 'BUILD_OK' } else { Get-Content '.pio\\release_validate.log' -Tail 80; exit $LASTEXITCODE }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build fullfb",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_fullfb.log'; if ($LASTEXITCODE -eq 0) { Get-Content '.pio\\release_fullfb.log' -Tail 20 } else { Get-Content '.pio\\release_fullfb.log' -Tail 120; exit $LASTEXITCODE }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build verify 2",
+			"type": "shell",
+			"command": "C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"esp32-s3-devkitc-1-release"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build vsync present",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_vsync_present.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_vsync_present.log' -Tail 120; exit $LASTEXITCODE } else { Get-Content '.pio\\release_vsync_present.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build queued-present",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_queued_present.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_queued_present.log' -Tail 140; exit $LASTEXITCODE } else { Get-Content '.pio\\release_queued_present.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build timing tune",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_timing_tune.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_timing_tune.log' -Tail 140; exit $LASTEXITCODE } else { Get-Content '.pio\\release_timing_tune.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release upload timing tune",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --target upload --environment esp32-s3-devkitc-1-release *> '.pio\\upload_timing_tune.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\upload_timing_tune.log' -Tail 120; exit $LASTEXITCODE } else { Get-Content '.pio\\upload_timing_tune.log' -Tail 30 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build nav boot",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_nav_boot.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_nav_boot.log' -Tail 140; exit $LASTEXITCODE } else { Get-Content '.pio\\release_nav_boot.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build boot-fix",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_boot_fix.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_boot_fix.log' -Tail 140; exit $LASTEXITCODE } else { Get-Content '.pio\\release_boot_fix.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release build restore-nav",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& 'C:\\Users\\Jason\\.platformio\\penv\\Scripts\\platformio.exe' run --environment esp32-s3-devkitc-1-release *> '.pio\\release_restore_nav.log'; if ($LASTEXITCODE -ne 0) { Get-Content '.pio\\release_restore_nav.log' -Tail 140; exit $LASTEXITCODE } else { Get-Content '.pio\\release_restore_nav.log' -Tail 40 }"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

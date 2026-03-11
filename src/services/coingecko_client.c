@@ -13,7 +13,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "freertos/semphr.h"
+
+#include "services/app_state_guard.h"
 #include "services/nvs_store.h"
+#include "services/wifi_manager.h"
 
 static const char *TAG = "coingecko";
 
@@ -27,6 +31,9 @@ static const char *TAG = "coingecko";
 #define COINGECKO_CHART_ENDPOINT "/api/v3/coins"
 #define CHART_CACHE_TTL_S 60
 #define CHART_MAX_POINTS 300
+#define HTTP_RETRY_COUNT 3
+#define HTTP_RETRY_DELAY_MS 1500
+#define COINGECKO_MARKETS_BATCH_SIZE 24
 
 typedef struct {
     char *buf;
@@ -43,6 +50,46 @@ typedef struct {
 } chart_cache_entry_t;
 
 static chart_cache_entry_t s_chart_cache[6] = {0};
+static SemaphoreHandle_t s_chart_cache_mutex = NULL;
+
+static bool is_transient_http_error(esp_err_t err)
+{
+    return err == ESP_ERR_HTTP_CONNECT ||
+           err == ESP_ERR_TIMEOUT ||
+           err == ESP_ERR_HTTP_EAGAIN;
+}
+
+static bool lock_chart_cache(TickType_t timeout_ticks)
+{
+    if (!s_chart_cache_mutex) {
+        return false;
+    }
+    return xSemaphoreTake(s_chart_cache_mutex, timeout_ticks) == pdTRUE;
+}
+
+static void unlock_chart_cache(void)
+{
+    if (s_chart_cache_mutex) {
+        xSemaphoreGive(s_chart_cache_mutex);
+    }
+}
+
+static esp_err_t duplicate_chart_points(const chart_point_t *src, size_t count, chart_point_t **out_points, size_t *out_count)
+{
+    if (!src || !out_points || !out_count || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    chart_point_t *copy = calloc(count, sizeof(chart_point_t));
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(copy, src, count * sizeof(chart_point_t));
+    *out_points = copy;
+    *out_count = count;
+    return ESP_OK;
+}
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -76,47 +123,71 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
 static esp_err_t http_get_json(const char *url, char **out)
 {
-    http_buffer_t buffer = {0};
+    if (!url || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    esp_http_client_config_t config = {
-        .url = url,
-        .event_handler = http_event_handler,
-        .user_data = &buffer,
-        .timeout_ms = 10000
-    };
+    *out = NULL;
+    esp_err_t last_err = ESP_FAIL;
+
+    for (int attempt = 0; attempt < HTTP_RETRY_COUNT; attempt++) {
+        http_buffer_t buffer = {0};
+
+        esp_http_client_config_t config = {
+            .url = url,
+            .event_handler = http_event_handler,
+            .user_data = &buffer,
+            .timeout_ms = 10000,
+            .keep_alive_enable = false,
+        };
 
 #if CT_DEV_SKIP_TLS
-    config.skip_cert_common_name_check = true;
+        config.skip_cert_common_name_check = true;
 #else
-    config.crt_bundle_attach = esp_crt_bundle_attach;
+        config.crt_bundle_attach = esp_crt_bundle_attach;
 #endif
 
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        return ESP_FAIL;
-    }
-
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    int64_t content_len = esp_http_client_get_content_length(client);
-
-    if (err != ESP_OK || status != 200) {
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "HTTP GET failed: %s url=%s", esp_err_to_name(err), url);
-        } else {
-            ESP_LOGW(TAG, "HTTP GET status=%d url=%s len=%lld", status, url, (long long)content_len);
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client) {
+            return ESP_FAIL;
         }
+
+        esp_http_client_set_header(client, "Accept", "application/json");
+
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        int64_t content_len = esp_http_client_get_content_length(client);
+
+        if (err == ESP_OK && status == 200) {
+            esp_http_client_cleanup(client);
+            *out = buffer.buf;
+            return ESP_OK;
+        }
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP GET failed: %s url=%s attempt=%d/%d", esp_err_to_name(err), url, attempt + 1, HTTP_RETRY_COUNT);
+            last_err = err;
+        } else {
+            ESP_LOGW(TAG, "HTTP GET status=%d url=%s len=%lld attempt=%d/%d", status, url, (long long)content_len, attempt + 1, HTTP_RETRY_COUNT);
+            last_err = (status == 429) ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        }
+
         free(buffer.buf);
         esp_http_client_cleanup(client);
-        if (err == ESP_OK && status == 429) {
-            return ESP_ERR_TIMEOUT;
+
+        if (status == 429) {
+            return last_err;
         }
-        return err != ESP_OK ? err : ESP_FAIL;
+
+        if (attempt + 1 < HTTP_RETRY_COUNT && is_transient_http_error(last_err)) {
+            vTaskDelay(pdMS_TO_TICKS(HTTP_RETRY_DELAY_MS));
+            continue;
+        }
+
+        return last_err;
     }
 
-    esp_http_client_cleanup(client);
-    *out = buffer.buf;
-    return ESP_OK;
+    return last_err;
 }
 
 static esp_err_t parse_coin_list(const char *json, coin_list_t *list)
@@ -296,6 +367,67 @@ static char *build_ids_query(const coin_list_t *list)
                 return NULL;
             }
             ids = grown;
+            cap = new_cap;
+        }
+
+        if (pos > 0) {
+            ids[pos++] = ',';
+        }
+        memcpy(ids + pos, id, id_len);
+        pos += id_len;
+        ids[pos] = '\0';
+    }
+
+    if (pos == 0) {
+        free(ids);
+        return NULL;
+    }
+
+    return ids;
+}
+
+static char *build_ids_csv_chunk(const app_state_t *state, size_t start, size_t count)
+{
+    if (!state || state->watchlist_count == 0 || count == 0 || start >= state->watchlist_count) {
+        return NULL;
+    }
+
+    size_t end = start + count;
+    if (end > state->watchlist_count) {
+        end = state->watchlist_count;
+    }
+
+    size_t cap = (end - start) * 40;
+    if (cap < 64) {
+        cap = 64;
+    }
+
+    char *ids = malloc(cap);
+    if (!ids) {
+        return NULL;
+    }
+
+    size_t pos = 0;
+    ids[0] = '\0';
+    for (size_t i = start; i < end; i++) {
+        const char *id = state->watchlist[i].id;
+        if (!id || id[0] == '\0') {
+            continue;
+        }
+
+        size_t id_len = strlen(id);
+        size_t needed = pos + id_len + (pos > 0 ? 1 : 0) + 1;
+        if (needed > cap) {
+            size_t new_cap = cap * 2;
+            while (new_cap < needed) {
+                new_cap *= 2;
+            }
+            char *new_ids = realloc(ids, new_cap);
+            if (!new_ids) {
+                free(ids);
+                return NULL;
+            }
+            ids = new_ids;
             cap = new_cap;
         }
 
@@ -580,6 +712,14 @@ static void update_coin_from_json(coin_t *coin, const cJSON *item, bool update_p
 
 esp_err_t coingecko_client_init(void)
 {
+    if (!s_chart_cache_mutex) {
+        s_chart_cache_mutex = xSemaphoreCreateMutex();
+        if (!s_chart_cache_mutex) {
+            ESP_LOGE(TAG, "Chart cache mutex create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     ESP_LOGI(TAG, "CoinGecko client ready");
     return ESP_OK;
 }
@@ -644,51 +784,86 @@ esp_err_t coingecko_client_fetch_markets_mode(app_state_t *state, bool update_pr
         return ESP_ERR_INVALID_ARG;
     }
 
-    char *ids = build_ids_csv(state);
-    if (!ids) {
-        return ESP_ERR_NO_MEM;
-    }
+    bool any_success = false;
+    esp_err_t last_err = ESP_FAIL;
+    for (size_t start = 0; start < state->watchlist_count; start += COINGECKO_MARKETS_BATCH_SIZE) {
+        char *ids = build_ids_csv_chunk(state, start, COINGECKO_MARKETS_BATCH_SIZE);
+        if (!ids) {
+            if (any_success) {
+                continue;
+            }
+            return ESP_ERR_NO_MEM;
+        }
 
-    char url[512];
-    snprintf(url, sizeof(url),
-             "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d,30d,1y&sparkline=false&precision=full",
-             COINGECKO_BASE_URL,
-             COINGECKO_MARKETS_ENDPOINT,
-             ids);
+        size_t url_len = strlen(COINGECKO_BASE_URL) + strlen(COINGECKO_MARKETS_ENDPOINT) +
+                         strlen("?vs_currency=usd&ids=") + strlen(ids) +
+                         strlen("&price_change_percentage=1h,24h,7d,30d,1y&sparkline=false&precision=full") + 1;
+        char *url = malloc(url_len);
+        if (!url) {
+            free(ids);
+            if (any_success) {
+                continue;
+            }
+            return ESP_ERR_NO_MEM;
+        }
 
-    free(ids);
+        snprintf(url, url_len,
+                 "%s%s?vs_currency=usd&ids=%s&price_change_percentage=1h,24h,7d,30d,1y&sparkline=false&precision=full",
+                 COINGECKO_BASE_URL,
+                 COINGECKO_MARKETS_ENDPOINT,
+                 ids);
+        free(ids);
 
-    char *json = NULL;
-    esp_err_t err = http_get_json(url, &json);
-    if (err != ESP_OK) {
-        return err;
-    }
+        char *json = NULL;
+        esp_err_t err = http_get_json(url, &json);
+        free(url);
+        if (err != ESP_OK) {
+            last_err = err;
+            if (err == ESP_ERR_TIMEOUT ||
+                err == ESP_ERR_NO_MEM ||
+                err == ESP_ERR_HTTP_FETCH_HEADER ||
+                err == ESP_ERR_HTTP_WRITE_DATA) {
+                break;
+            }
+            continue;
+        }
 
-    cJSON *root = cJSON_Parse(json);
-    if (!root || !cJSON_IsArray(root)) {
+        cJSON *root = cJSON_Parse(json);
+        if (!root || !cJSON_IsArray(root)) {
+            cJSON_Delete(root);
+            free(json);
+            last_err = ESP_FAIL;
+            continue;
+        }
+
+        if (!app_state_guard_lock(250)) {
+            cJSON_Delete(root);
+            free(json);
+            return any_success ? ESP_OK : ESP_ERR_TIMEOUT;
+        }
+
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, root) {
+            cJSON *id = cJSON_GetObjectItem(item, "id");
+            if (!cJSON_IsString(id)) {
+                continue;
+            }
+
+            coin_t *coin = find_coin_by_id(state, id->valuestring);
+            if (!coin) {
+                continue;
+            }
+
+            update_coin_from_json(coin, item, update_price);
+        }
+        app_state_guard_unlock();
+
         cJSON_Delete(root);
         free(json);
-        return ESP_FAIL;
+        any_success = true;
     }
 
-    cJSON *item = NULL;
-    cJSON_ArrayForEach(item, root) {
-        cJSON *id = cJSON_GetObjectItem(item, "id");
-        if (!cJSON_IsString(id)) {
-            continue;
-        }
-
-        coin_t *coin = find_coin_by_id(state, id->valuestring);
-        if (!coin) {
-            continue;
-        }
-
-        update_coin_from_json(coin, item, update_price);
-    }
-
-    cJSON_Delete(root);
-    free(json);
-    return ESP_OK;
+    return any_success ? ESP_OK : last_err;
 }
 
 esp_err_t coingecko_client_fetch_markets(app_state_t *state)
@@ -703,11 +878,15 @@ esp_err_t coingecko_client_get_chart(const char *coin_id, int days, const chart_
     }
 
     int64_t now_s = esp_timer_get_time() / 1000000;
-    chart_cache_entry_t *entry = get_cache_entry(coin_id, days);
-    if (entry && (now_s - entry->timestamp_s) < CHART_CACHE_TTL_S && entry->points) {
-        *points = entry->points;
-        *count = entry->count;
-        return ESP_OK;
+    if (lock_chart_cache(pdMS_TO_TICKS(250))) {
+        chart_cache_entry_t *entry = get_cache_entry(coin_id, days);
+        if (entry && (now_s - entry->timestamp_s) < CHART_CACHE_TTL_S && entry->points) {
+            *points = entry->points;
+            *count = entry->count;
+            unlock_chart_cache();
+            return ESP_OK;
+        }
+        unlock_chart_cache();
     }
 
     char url[256];
@@ -731,6 +910,12 @@ esp_err_t coingecko_client_get_chart(const char *coin_id, int days, const chart_
         return err;
     }
 
+    if (!lock_chart_cache(pdMS_TO_TICKS(1000))) {
+        free(new_points);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    chart_cache_entry_t *entry = get_cache_entry(coin_id, days);
     if (!entry) {
         entry = get_cache_slot();
         free_cache_entry(entry);
@@ -746,7 +931,39 @@ esp_err_t coingecko_client_get_chart(const char *coin_id, int days, const chart_
 
     *points = entry->points;
     *count = entry->count;
+    unlock_chart_cache();
     return ESP_OK;
+}
+
+esp_err_t coingecko_client_copy_chart(const char *coin_id, int days, chart_point_t **points, size_t *count)
+{
+    if (!coin_id || !points || !count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *points = NULL;
+    *count = 0;
+
+    const chart_point_t *cached_points = NULL;
+    size_t cached_count = 0;
+    esp_err_t err = coingecko_client_get_chart(coin_id, days, &cached_points, &cached_count);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (!lock_chart_cache(pdMS_TO_TICKS(250))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    chart_cache_entry_t *entry = get_cache_entry(coin_id, days);
+    if (!entry || !entry->points || entry->count == 0) {
+        unlock_chart_cache();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    err = duplicate_chart_points(entry->points, entry->count, points, count);
+    unlock_chart_cache();
+    return err;
 }
 
 esp_err_t coingecko_client_get_chart_cached(const char *coin_id, int days, const chart_point_t **points, size_t *count)
@@ -756,17 +973,24 @@ esp_err_t coingecko_client_get_chart_cached(const char *coin_id, int days, const
     }
 
     int64_t now_s = esp_timer_get_time() / 1000000;
+    if (!lock_chart_cache(pdMS_TO_TICKS(250))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     chart_cache_entry_t *entry = get_cache_entry(coin_id, days);
     if (!entry || !entry->points) {
+        unlock_chart_cache();
         return ESP_ERR_NOT_FOUND;
     }
 
     if ((now_s - entry->timestamp_s) >= CHART_CACHE_TTL_S) {
+        unlock_chart_cache();
         return ESP_ERR_NOT_FOUND;
     }
 
     *points = entry->points;
     *count = entry->count;
+    unlock_chart_cache();
     return ESP_OK;
 }
 
