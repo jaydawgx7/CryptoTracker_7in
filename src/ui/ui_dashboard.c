@@ -534,7 +534,40 @@ static void coin_row_click_event(lv_event_t *e)
     if (!row || !s_state || row->coin_index >= s_state->watchlist_count) {
         return;
     }
+    ui_nav_set_back_target(UI_NAV_DASHBOARD);
     ui_show_coin_detail(row->coin_index);
+}
+
+static size_t find_dashboard_coin_index(const char *coin_id, const char *symbol)
+{
+    if (!s_state) {
+        return SIZE_MAX;
+    }
+
+    for (size_t i = 0; i < s_state->watchlist_count; i++) {
+        const coin_t *coin = &s_state->watchlist[i];
+        if (coin_id && coin_id[0] != '\0' && strcasecmp(coin->id, coin_id) == 0) {
+            return i;
+        }
+        if (symbol && symbol[0] != '\0' && strcasecmp(coin->symbol, symbol) == 0) {
+            return i;
+        }
+    }
+
+    return SIZE_MAX;
+}
+
+static void btc_price_click_event(lv_event_t *e)
+{
+    (void)e;
+
+    size_t index = find_dashboard_coin_index("bitcoin", "BTC");
+    if (index == SIZE_MAX) {
+        return;
+    }
+
+    ui_nav_set_back_target(UI_NAV_DASHBOARD);
+    ui_show_coin_detail(index);
 }
 
 static void coin_row_long_press_event(lv_event_t *e)
@@ -1394,7 +1427,16 @@ lv_obj_t *ui_dashboard_screen_create(void)
     lv_obj_set_style_bg_opa(btc_col, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(btc_col, 0, 0);
     lv_obj_set_style_pad_all(btc_col, 0, 0);
+    lv_obj_set_style_radius(btc_col, 10, 0);
     lv_obj_clear_flag(btc_col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btc_col, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(btc_col, lv_color_hex(theme ? theme->nav_inactive_bg : 0x151A24), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btc_col, LV_OPA_70, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_width(btc_col, 1, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_color(btc_col, lv_color_hex(theme ? theme->accent : 0x00FE8F), LV_STATE_PRESSED);
+    lv_obj_set_style_outline_opa(btc_col, LV_OPA_50, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_pad(btc_col, 0, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btc_col, btc_price_click_event, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *btc_dot = lv_obj_create(btc_col);
     lv_obj_set_size(btc_dot, 6, 6);

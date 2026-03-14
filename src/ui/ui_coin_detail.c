@@ -103,6 +103,7 @@ static void format_axis_price(double price, char *buf, size_t len);
 static int range_to_days(chart_range_t range);
 static void set_chart_data(const chart_point_t *points, size_t count);
 static void request_chart(void);
+static void hide_tooltip(void);
 
 static void set_label_text_if_changed(lv_obj_t *label, const char *text)
 {
@@ -121,6 +122,41 @@ static void set_label_text_if_changed(lv_obj_t *label, const char *text)
 static void free_chart_points(chart_point_t *points)
 {
     free(points);
+}
+
+static void reset_screen_handles(void)
+{
+    s_screen = NULL;
+    s_title = NULL;
+    s_chip_container = NULL;
+    s_holdings = NULL;
+    s_chart = NULL;
+    s_series = NULL;
+    s_status = NULL;
+    s_footer_updated = NULL;
+    s_y_axis = NULL;
+    s_x_axis = NULL;
+    s_tooltip = NULL;
+    s_tooltip_label = NULL;
+    s_guideline = NULL;
+
+    for (int i = 0; i < CHIP_COUNT; i++) {
+        s_chip_boxes[i] = NULL;
+        s_chip_labels[i] = NULL;
+    }
+
+    for (int i = 0; i < RANGE_BUTTON_COUNT; i++) {
+        s_range_buttons[i] = NULL;
+        s_range_labels[i] = NULL;
+    }
+
+    for (int i = 0; i < Y_LABEL_COUNT; i++) {
+        s_y_labels[i] = NULL;
+    }
+
+    for (int i = 0; i < X_LABEL_COUNT; i++) {
+        s_x_labels[i] = NULL;
+    }
 }
 
 static uint32_t detail_footer_update_period_ms(uint32_t age_s)
@@ -142,6 +178,28 @@ static void clear_chart_cache(void)
     s_chart_coin_id[0] = '\0';
     s_chart_loaded_range = RANGE_24H;
     s_chart_needs_render = true;
+}
+
+void ui_coin_detail_release_resources(void)
+{
+    s_loading = false;
+    hide_tooltip();
+    clear_chart_cache();
+}
+
+static void coin_detail_screen_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_DELETE) {
+        return;
+    }
+
+    if (s_footer_timer) {
+        lv_timer_del(s_footer_timer);
+        s_footer_timer = NULL;
+    }
+
+    ui_coin_detail_release_resources();
+    reset_screen_handles();
 }
 
 static void adopt_chart_data(chart_point_t *points, size_t count, const char *coin_id, chart_range_t range)
@@ -942,6 +1000,7 @@ void ui_coin_detail_refresh_if_active(void)
 lv_obj_t *ui_coin_detail_screen_create(void)
 {
     s_screen = lv_obj_create(NULL);
+    lv_obj_add_event_cb(s_screen, coin_detail_screen_event_cb, LV_EVENT_DELETE, NULL);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x0F1117), 0);
     lv_obj_set_style_pad_top(s_screen, UI_NAV_HEIGHT, 0);
     const ui_theme_colors_t *theme = ui_theme_get();

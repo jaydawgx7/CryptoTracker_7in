@@ -39,10 +39,8 @@
 #define CT_LCD_PIN_D14 3
 #define CT_LCD_PIN_D15 46
 
-// Tuned timing configuration for CrowPanel Advance 7" (800x480)
-// Key settings: slightly reduced PCLK plus LVGL vertical compensation.
-// The panel is most stable when the RGB engine has a little more margin while
-// LVGL renders and the visible area is shifted by the known 40-line offset.
+// Stable timing configuration for CrowPanel Advance 7" (800x480)
+// Keep this aligned with the actual boot-time panel config shown in Settings.
 #define CT_LCD_PCLK_HZ 13000000
 #define CT_LCD_HSYNC_PW 4
 #define CT_LCD_HSYNC_BP 40
@@ -94,15 +92,7 @@
 #endif
 
 #ifndef CT_LCD_Y_OFFSET
-#define CT_LCD_Y_OFFSET -40
-#endif
-
-#ifndef CT_LCD_LVGL_V_RES
-#define CT_LCD_LVGL_V_RES CT_LCD_V_RES
-#endif
-
-#ifndef CT_LCD_BOUNCE_LINES
-#define CT_LCD_BOUNCE_LINES 20
+#define CT_LCD_Y_OFFSET 0
 #endif
 
 esp_err_t display_driver_init(void);

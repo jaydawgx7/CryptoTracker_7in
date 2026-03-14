@@ -3,9 +3,8 @@
 #include "ui/ui.h"
 #include "ui/ui_theme.h"
 
-static void nav_event(lv_event_t *e)
+static void route_to_page(ui_nav_page_t page)
 {
-	ui_nav_page_t page = (ui_nav_page_t)(uintptr_t)lv_event_get_user_data(e);
 	switch (page) {
 		case UI_NAV_DASHBOARD:
 			ui_show_dashboard();
@@ -26,6 +25,25 @@ static void nav_event(lv_event_t *e)
 		default:
 			break;
 	}
+}
+
+static void nav_event(lv_event_t *e)
+{
+	ui_nav_page_t page = (ui_nav_page_t)(uintptr_t)lv_event_get_user_data(e);
+	route_to_page(page);
+}
+
+static ui_nav_page_t s_back_target_page = UI_NAV_HOME;
+
+void ui_nav_set_back_target(ui_nav_page_t page)
+{
+	s_back_target_page = page;
+}
+
+static void back_event(lv_event_t *e)
+{
+	(void)e;
+	route_to_page(s_back_target_page);
 }
 
 static lv_obj_t *create_nav_button(lv_obj_t *parent, const char *label, ui_nav_page_t page, bool active)
@@ -86,18 +104,23 @@ static void ui_nav_attach_internal(lv_obj_t *screen, ui_nav_page_t active_page, 
 
 	lv_obj_t *buttons[4] = {0};
 	if (back_only) {
-		buttons[0] = create_nav_button(nav, home_text, UI_NAV_HOME, false);
+		buttons[0] = lv_btn_create(nav);
+		lv_obj_set_size(buttons[0], 180, 40);
+		lv_obj_set_style_radius(buttons[0], 10, 0);
 		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(inactive_bg), 0);
 		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(active_bg), LV_STATE_PRESSED);
-		lv_obj_t *label = lv_obj_get_child(buttons[0], 0);
-		if (label) {
-			lv_obj_set_style_text_color(label, lv_color_hex(active_text), 0);
-			lv_obj_set_style_text_color(label, lv_color_hex(active_text), LV_STATE_PRESSED);
-		}
+		lv_obj_add_event_cb(buttons[0], back_event, LV_EVENT_CLICKED, NULL);
+		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(inactive_bg), 0);
+		lv_obj_set_style_bg_color(buttons[0], lv_color_hex(active_bg), LV_STATE_PRESSED);
+		lv_obj_t *label = lv_label_create(buttons[0]);
+		lv_label_set_text(label, home_text);
+		lv_obj_set_style_text_color(label, lv_color_hex(active_text), 0);
+		lv_obj_set_style_text_color(label, lv_color_hex(active_text), LV_STATE_PRESSED);
+		lv_obj_center(label);
 	} else {
 		buttons[0] = create_nav_button(nav, "Dashboard", UI_NAV_DASHBOARD, active_page == UI_NAV_DASHBOARD);
 		buttons[1] = create_nav_button(nav, home_text, UI_NAV_HOME, active_page == UI_NAV_HOME);
-		buttons[2] = create_nav_button(nav, "Alerts", UI_NAV_ALERTS, active_page == UI_NAV_ALERTS);
+		buttons[2] = create_nav_button(nav, "News", UI_NAV_ALERTS, active_page == UI_NAV_ALERTS);
 		buttons[3] = create_nav_button(nav, "Settings", UI_NAV_SETTINGS, active_page == UI_NAV_SETTINGS);
 	}
 

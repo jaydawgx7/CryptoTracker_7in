@@ -949,6 +949,7 @@ static void row_event_cb(lv_event_t *e)
             lv_event_stop_processing(e);
             return;
         }
+        ui_nav_set_back_target(UI_NAV_HOME);
         ui_show_coin_detail(index);
     }
 }

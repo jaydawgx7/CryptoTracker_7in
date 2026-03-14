@@ -14,6 +14,7 @@
 #include "services/fng_service.h"
 #include "services/http_server.h"
 #include "services/i2c_bus.h"
+#include "services/news_service.h"
 #include "services/nvs_store.h"
 #include "services/scheduler.h"
 #include "services/touch_driver.h"
@@ -146,6 +147,8 @@ void app_main(void)
         ESP_ERROR_CHECK(wifi_manager_init());
         ESP_ERROR_CHECK(coingecko_client_init());
         ESP_ERROR_CHECK(fng_service_init());
+        ESP_ERROR_CHECK(news_service_init());
+        (void)news_service_request_refresh();
         ESP_ERROR_CHECK(http_server_init());
         http_server_set_state(&s_app_state);
     } else {

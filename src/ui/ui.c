@@ -60,6 +60,90 @@ static lv_obj_t *s_touch_indicator = NULL;
 static lv_timer_t *s_touch_timer = NULL;
 #endif
 
+static lv_obj_t *ensure_home_screen(void)
+{
+    if (!s_home_screen) {
+        s_home_screen = ui_home_screen_create();
+    }
+    return s_home_screen;
+}
+
+static lv_obj_t *ensure_dashboard_screen(void)
+{
+    if (!s_dashboard_screen) {
+        s_dashboard_screen = ui_dashboard_screen_create();
+    }
+    return s_dashboard_screen;
+}
+
+static lv_obj_t *ensure_settings_screen(void)
+{
+    if (!s_settings_screen) {
+        s_settings_screen = ui_settings_screen_create();
+    }
+    return s_settings_screen;
+}
+
+static lv_obj_t *ensure_add_coin_screen(void)
+{
+    if (!s_add_coin_screen) {
+        s_add_coin_screen = ui_add_coin_screen_create();
+    }
+    return s_add_coin_screen;
+}
+
+static lv_obj_t *ensure_alerts_screen(void)
+{
+    if (!s_alerts_screen) {
+        s_alerts_screen = ui_alerts_screen_create();
+    }
+    return s_alerts_screen;
+}
+
+static lv_obj_t *ensure_coin_detail_screen(void)
+{
+    if (!s_coin_detail_screen) {
+        s_coin_detail_screen = ui_coin_detail_screen_create();
+    }
+    return s_coin_detail_screen;
+}
+
+static lv_obj_t *ensure_touch_cal_screen(void)
+{
+    if (!s_touch_cal_screen) {
+        s_touch_cal_screen = ui_touch_cal_screen_create();
+    }
+    return s_touch_cal_screen;
+}
+
+static void destroy_screen(lv_obj_t **screen)
+{
+    if (!screen || !*screen) {
+        return;
+    }
+
+    if (lv_obj_is_valid(*screen)) {
+        lv_obj_del(*screen);
+    }
+
+    *screen = NULL;
+}
+
+static void release_transient_screens(lv_obj_t *keep)
+{
+#if !CT_UI_MINIMAL
+    destroy_screen((keep == s_add_coin_screen) ? NULL : &s_add_coin_screen);
+    destroy_screen((keep == s_alerts_screen) ? NULL : &s_alerts_screen);
+    if (keep != s_coin_detail_screen) {
+        ui_coin_detail_release_resources();
+        destroy_screen(&s_coin_detail_screen);
+    }
+    destroy_screen((keep == s_touch_cal_screen) ? NULL : &s_touch_cal_screen);
+#else
+    (void)keep;
+#endif
+}
+
 static void load_screen(lv_obj_t *screen)
 {
     if (!screen) {
@@ -68,8 +152,19 @@ static void load_screen(lv_obj_t *screen)
     if (lv_scr_act() == screen) {
         return;
     }
-    lv_obj_update_layout(screen);
-    lv_scr_load(screen);
+    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+}
+
+static void prepare_current_screen_for_hide(void)
+{
+    lv_obj_t *active = lv_scr_act();
+    if (!active) {
+        return;
+    }
+
+    if (active == s_alerts_screen) {
+        ui_alerts_prepare_for_hide();
+    }
 }
 
 static void apply_state_to_screens(const app_state_t *state)
@@ -124,10 +219,10 @@ static void rebuild_screens(void)
     s_home_screen = ui_home_screen_create();
     s_dashboard_screen = ui_dashboard_screen_create();
 #if !CT_UI_MINIMAL
-    s_settings_screen = ui_settings_screen_create();
-    s_add_coin_screen = ui_add_coin_screen_create();
-    s_alerts_screen = ui_alerts_screen_create();
-    s_coin_detail_screen = ui_coin_detail_screen_create();
+    s_settings_screen = show_settings ? ui_settings_screen_create() : NULL;
+    s_add_coin_screen = show_add ? ui_add_coin_screen_create() : NULL;
+    s_alerts_screen = show_alerts ? ui_alerts_screen_create() : NULL;
+    s_coin_detail_screen = show_detail ? ui_coin_detail_screen_create() : NULL;
     s_touch_cal_screen = show_touch_cal ? ui_touch_cal_screen_create() : NULL;
 #endif
 
@@ -251,24 +346,15 @@ void ui_init(void)
         return;
     }
 
-    bool dark_mode = true;
-    if (s_app_state) {
-        dark_mode = s_app_state->prefs.dark_mode;
-        ui_theme_set_accent(s_app_state->prefs.accent_hex);
-        ui_theme_set_shadow_color(s_app_state->prefs.shadow_hex);
-        ui_theme_set_shadow_strength((uint8_t)s_app_state->prefs.button_shadow_strength);
-        ui_theme_set_buttons_3d(s_app_state->prefs.buttons_3d);
-    }
-    ui_theme_set_dark_mode(dark_mode);
-    ui_theme_init(dark_mode);
+    ui_theme_init(true);
 
     s_home_screen = ui_home_screen_create();
     s_dashboard_screen = ui_dashboard_screen_create();
 #if !CT_UI_MINIMAL
-    s_settings_screen = ui_settings_screen_create();
-    s_add_coin_screen = ui_add_coin_screen_create();
-    s_alerts_screen = ui_alerts_screen_create();
-    s_coin_detail_screen = ui_coin_detail_screen_create();
+    s_settings_screen = NULL;
+    s_add_coin_screen = NULL;
+    s_alerts_screen = NULL;
+    s_coin_detail_screen = NULL;
     s_touch_cal_screen = NULL;
 #endif
 
@@ -296,16 +382,18 @@ void ui_init(void)
 void ui_show_home(void)
 {
     rebuild_if_pending();
-    ui_home_prepare_for_show();
-    load_screen(s_home_screen);
+    load_screen(ensure_home_screen());
+    release_transient_screens(NULL);
+    ui_home_refresh();
 }
 
 void ui_show_dashboard(void)
 {
     rebuild_if_pending();
-    if (s_dashboard_screen) {
-        ui_dashboard_prepare_for_show();
+    if (ensure_dashboard_screen()) {
         load_screen(s_dashboard_screen);
+        release_transient_screens(NULL);
+        ui_dashboard_refresh();
     }
 }
 
@@ -331,6 +419,8 @@ void ui_set_app_state(const app_state_t *state)
         ui_home_refresh();
     } else if (lv_scr_act() == s_alerts_screen) {
         ui_alerts_refresh();
+    } else if (lv_scr_act() == s_coin_detail_screen) {
+        ui_coin_detail_refresh_if_active();
     }
 
     display_driver_unlock();
@@ -363,38 +453,46 @@ void ui_apply_theme(bool dark_mode)
 void ui_show_add_coin(void)
 {
     rebuild_if_pending();
-    load_screen(s_add_coin_screen);
+    prepare_current_screen_for_hide();
+    load_screen(ensure_add_coin_screen());
+    release_transient_screens(s_add_coin_screen);
 }
 
 void ui_show_alerts(void)
 {
     rebuild_if_pending();
+    prepare_current_screen_for_hide();
+    load_screen(ensure_alerts_screen());
+    release_transient_screens(s_alerts_screen);
     ui_alerts_prepare_for_show();
-    load_screen(s_alerts_screen);
 }
 
 void ui_show_coin_detail(size_t index)
 {
     rebuild_if_pending();
-    if (s_coin_detail_screen) {
+    if (ensure_coin_detail_screen()) {
+        prepare_current_screen_for_hide();
         ui_coin_detail_show_index(index);
         load_screen(s_coin_detail_screen);
+        release_transient_screens(s_coin_detail_screen);
     }
 }
 
 void ui_show_settings(void)
 {
     rebuild_if_pending();
-    load_screen(s_settings_screen);
+    prepare_current_screen_for_hide();
+    load_screen(ensure_settings_screen());
+    release_transient_screens(NULL);
 }
 
 void ui_show_touch_calibration(void)
 {
     rebuild_if_pending();
-    if (!s_touch_cal_screen) {
-        s_touch_cal_screen = ui_touch_cal_screen_create();
-    }
+    ensure_touch_cal_screen();
+    prepare_current_screen_for_hide();
     load_screen(s_touch_cal_screen);
+    release_transient_screens(s_touch_cal_screen);
 }
 
 void ui_request_home_header_update(wifi_state_t wifi_state, int rssi, uint32_t updated_age_s, bool offline, bool rate_limited)
