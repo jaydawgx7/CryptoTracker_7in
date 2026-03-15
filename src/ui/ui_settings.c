@@ -11,6 +11,7 @@
 #include "services/github_update.h"
 #include "services/nvs_store.h"
 #include "services/ota_update.h"
+#include "services/scheduler.h"
 #include "services/touch_driver.h"
 #include "services/wifi_manager.h"
 
@@ -425,19 +426,19 @@ static void get_shadow_strength_style(button_shadow_strength_t level, int16_t *w
 
     switch (level) {
         case BUTTON_SHADOW_MINIMAL:
-            *width = 6;
+            *width = 2;
             *ofs_y = 1;
-            *opa = LV_OPA_80;
+            *opa = LV_OPA_30;
             break;
         case BUTTON_SHADOW_MEDIUM:
-            *width = 8;
-            *ofs_y = 3;
-            *opa = LV_OPA_80;
+            *width = 3;
+            *ofs_y = 1;
+            *opa = LV_OPA_40;
             break;
         default:
-            *width = 10;
-            *ofs_y = 5;
-            *opa = LV_OPA_80;
+            *width = 4;
+            *ofs_y = 2;
+            *opa = LV_OPA_50;
             break;
     }
 }
@@ -489,9 +490,9 @@ static void update_theme_preview_button(void)
 
     uint32_t accent = s_state ? s_state->prefs.accent_hex : 0x00FE8F;
     uint32_t shadow = s_state ? s_state->prefs.shadow_hex : 0x2A3142;
-    int16_t shadow_width = 10;
-    int16_t shadow_ofs_y = 5;
-    lv_opa_t shadow_opa = LV_OPA_80;
+    int16_t shadow_width = 4;
+    int16_t shadow_ofs_y = 2;
+    lv_opa_t shadow_opa = LV_OPA_50;
     button_shadow_strength_t strength = get_shadow_strength_pref();
 
     get_shadow_strength_style(strength, &shadow_width, &shadow_ofs_y, &shadow_opa);
@@ -1151,6 +1152,10 @@ static void demo_portfolio_toggle_event(lv_event_t *e)
     (void)nvs_store_save_app_state(s_state);
     app_state_guard_unlock();
     ui_set_app_state(s_state);
+    ui_request_home_refresh();
+    ui_request_dashboard_refresh();
+    ui_request_coin_detail_refresh();
+    scheduler_request_immediate_refresh();
 }
 
 static void data_source_event(lv_event_t *e)

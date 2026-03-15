@@ -34,11 +34,44 @@ static news_snapshot_t s_snapshot_cache = {0};
 static size_t s_pending_render_index = 0;
 static int64_t s_last_render_fetched_at_s = -1;
 static size_t s_last_render_count = SIZE_MAX;
+static bool s_last_render_has_cache = false;
 static bool s_last_render_loading = false;
 static esp_err_t s_last_render_error = ESP_FAIL;
 
 static void refresh_alerts_internal(bool require_active);
 static void close_article_overlay(lv_event_t *e);
+
+static void alerts_screen_clear_refs(void)
+{
+    s_screen = NULL;
+    s_title = NULL;
+    s_subtitle = NULL;
+    s_status = NULL;
+    s_list = NULL;
+    s_loading_overlay = NULL;
+    s_loading_spinner = NULL;
+    s_loading_label = NULL;
+    s_article_overlay = NULL;
+    s_article_title = NULL;
+    s_article_meta = NULL;
+    s_article_body = NULL;
+    s_article_link = NULL;
+    s_list_build_timer = NULL;
+}
+
+static void alerts_screen_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_DELETE) {
+        return;
+    }
+
+    if (s_list_build_timer) {
+        lv_timer_del(s_list_build_timer);
+        s_list_build_timer = NULL;
+    }
+
+    alerts_screen_clear_refs();
+}
 
 static void pause_list_build(void)
 {
@@ -171,7 +204,7 @@ static bool ensure_article_overlay(void)
 
 static void set_label_text_if_changed(lv_obj_t *label, const char *text)
 {
-    if (!label || !text) {
+    if (!label || !text || !lv_obj_is_valid(label)) {
         return;
     }
 
@@ -189,11 +222,14 @@ static void set_loading_visible(bool visible, const char *text)
         return;
     }
 
-    if (!s_loading_overlay) {
+    if (!s_loading_overlay || !lv_obj_is_valid(s_loading_overlay)) {
+        s_loading_overlay = NULL;
+        s_loading_spinner = NULL;
+        s_loading_label = NULL;
         return;
     }
 
-    if (text && s_loading_label) {
+    if (text && s_loading_label && lv_obj_is_valid(s_loading_label)) {
         set_label_text_if_changed(s_loading_label, text);
     }
 
@@ -283,7 +319,7 @@ static void format_elapsed_age(int64_t since_s, char *buf, size_t len)
 static void close_article_overlay(lv_event_t *e)
 {
     (void)e;
-    if (s_article_overlay) {
+    if (s_article_overlay && lv_obj_is_valid(s_article_overlay)) {
         lv_obj_add_flag(s_article_overlay, LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -504,18 +540,23 @@ static void refresh_alerts_internal(bool require_active)
     update_status_line(snapshot);
     set_loading_visible(snapshot->loading && !snapshot->has_cache, snapshot->loading ? "Loading headlines..." : NULL);
 
-    bool changed = snapshot->fetched_at_s != s_last_render_fetched_at_s ||
-                   snapshot->count != s_last_render_count ||
-                   snapshot->loading != s_last_render_loading ||
-                   snapshot->last_error != s_last_render_error;
+    bool list_is_empty = !s_list || lv_obj_get_child_cnt(s_list) == 0;
+    bool list_content_changed = list_is_empty ||
+                                snapshot->has_cache != s_last_render_has_cache ||
+                                snapshot->fetched_at_s != s_last_render_fetched_at_s ||
+                                snapshot->count != s_last_render_count ||
+                                snapshot->last_error != s_last_render_error ||
+                                (!snapshot->has_cache && snapshot->loading != s_last_render_loading);
 
-    if (changed) {
+    if (list_content_changed) {
         rebuild_news_list(snapshot);
+        s_last_render_has_cache = snapshot->has_cache;
         s_last_render_fetched_at_s = snapshot->fetched_at_s;
         s_last_render_count = snapshot->count;
-        s_last_render_loading = snapshot->loading;
         s_last_render_error = snapshot->last_error;
     }
+
+    s_last_render_loading = snapshot->loading;
 
     if (news_needs_refresh(snapshot)) {
         refresh_news_request(false);
@@ -563,6 +604,7 @@ lv_obj_t *ui_alerts_screen_create(void)
 {
     s_theme = ui_theme_get();
     s_screen = lv_obj_create(NULL);
+    lv_obj_add_event_cb(s_screen, alerts_screen_event_cb, LV_EVENT_DELETE, NULL);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(s_theme ? s_theme->bg : 0x0F1117), 0);
     lv_obj_set_style_pad_top(s_screen, UI_NAV_HEIGHT, 0);
     lv_obj_set_style_border_width(s_screen, 0, 0);

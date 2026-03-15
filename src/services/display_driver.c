@@ -66,10 +66,26 @@ static StackType_t s_lvgl_stack[16384 / sizeof(StackType_t)] DRAM_ATTR;
 #define CT_LVGL_PAUSE_REFR_TIMER 0
 #endif
 
+#ifndef CT_LVGL_TASK_DELAY_MS
+#define CT_LVGL_TASK_DELAY_MS 5
+#endif
+
+#ifndef CT_LVGL_HANDLER_PERIOD_MS
+#define CT_LVGL_HANDLER_PERIOD_MS 10
+#endif
+
+#ifndef CT_LVGL_TICK_PERIOD_US
+#define CT_LVGL_TICK_PERIOD_US 1000
+#endif
+
+#ifndef CT_LVGL_TICK_INC_MS
+#define CT_LVGL_TICK_INC_MS 1
+#endif
+
 static void lv_tick_cb(void *arg)
 {
     (void)arg;
-    lv_tick_inc(2);
+    lv_tick_inc(CT_LVGL_TICK_INC_MS);
 }
 
 static void lvgl_handler_timer_cb(void *arg)
@@ -112,7 +128,7 @@ static void lvgl_task(void *arg)
         if (display_driver_lock(100)) {
             ui_process_pending();
 #if CT_LVGL_TASK_TICK
-            lv_tick_inc(10);
+            lv_tick_inc(CT_LVGL_TASK_DELAY_MS);
 #endif
 #if CT_LVGL_HANDLER_ENABLE
     #if CT_LVGL_HANDLER_IN_TASK
@@ -121,7 +137,7 @@ static void lvgl_task(void *arg)
 #endif
             display_driver_unlock();
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(CT_LVGL_TASK_DELAY_MS));
     }
 }
 
@@ -300,7 +316,7 @@ esp_err_t display_driver_init(void)
     };
     esp_timer_handle_t tick_timer;
     ESP_ERROR_CHECK(esp_timer_create(&tick_args, &tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, 2000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, CT_LVGL_TICK_PERIOD_US));
 #endif
 
     s_lvgl_mutex = xSemaphoreCreateMutex();
@@ -315,7 +331,7 @@ esp_err_t display_driver_init(void)
         .name = "lv_handler"
     };
     ESP_ERROR_CHECK(esp_timer_create(&handler_args, &s_lvgl_handler_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_lvgl_handler_timer, 16));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_lvgl_handler_timer, CT_LVGL_HANDLER_PERIOD_MS * 1000));
 #endif
 
     ESP_LOGI(TAG, "Display initialized");

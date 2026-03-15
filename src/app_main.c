@@ -1,6 +1,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_ota_ops.h"
@@ -36,6 +38,21 @@
 
 static const char *TAG = "app_main";
 static app_state_t s_app_state;
+
+#ifndef CT_LOCAL_TZ
+#define CT_LOCAL_TZ "EST5EDT,M3.2.0/2,M11.1.0/2"
+#endif
+
+static void configure_local_timezone(void)
+{
+    if (setenv("TZ", CT_LOCAL_TZ, 1) != 0) {
+        ESP_LOGW(TAG, "Failed to set TZ=%s", CT_LOCAL_TZ);
+        return;
+    }
+
+    tzset();
+    ESP_LOGI(TAG, "Timezone set to %s", CT_LOCAL_TZ);
+}
 
 static void log_ota_partitions(void)
 {
@@ -111,6 +128,8 @@ static void ui_init_task(void *arg)
 void app_main(void)
 {
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_ERROR);
+
+    configure_local_timezone();
 
     log_ota_partitions();
 

@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
-    [string]$Env = "esp32-s3-devkitc-1"
+    [string]$Env = "esp32-s3-devkitc-1-release"
 )
 
 $ErrorActionPreference = "Stop"

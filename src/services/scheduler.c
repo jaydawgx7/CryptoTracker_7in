@@ -49,6 +49,7 @@ static double s_last_change_24h[MAX_WATCHLIST] = {0};
 static double s_last_change_7d[MAX_WATCHLIST] = {0};
 static uint32_t s_network_error_streak = 0;
 static int64_t s_last_stack_log_s = 0;
+static volatile bool s_force_refresh_requested = false;
 
 static bool is_network_fetch_error(esp_err_t err)
 {
@@ -152,6 +153,13 @@ static uint32_t dashboard_metrics_interval_s_for_snapshot(const fng_snapshot_t *
     return 3600;
 }
 
+static bool consume_force_refresh_request(void)
+{
+    bool requested = s_force_refresh_requested;
+    s_force_refresh_requested = false;
+    return requested;
+}
+
 static void refresh_task(void *arg)
 {
     (void)arg;
@@ -200,6 +208,22 @@ static void refresh_task(void *arg)
             s_last_stack_log_s = now_s;
         }
 
+        bool force_refresh = consume_force_refresh_request();
+        if (force_refresh) {
+            s_last_market_fetch_s = 0;
+            s_last_coingecko_fetch_s = 0;
+            s_rate_limit_until_s = 0;
+            s_last_ui_refresh_s = 0;
+            s_market_fetch_succeeded_once = false;
+            s_portfolio_data_ready = false;
+            s_network_error_streak = 0;
+            memset(s_last_prices, 0, sizeof(s_last_prices));
+            memset(s_last_change_1h, 0, sizeof(s_last_change_1h));
+            memset(s_last_change_24h, 0, sizeof(s_last_change_24h));
+            memset(s_last_change_7d, 0, sizeof(s_last_change_7d));
+            ESP_LOGI(TAG, "Immediate refresh requested");
+        }
+
         bool rate_limited_active = (s_rate_limit_until_s > 0 && now_s < s_rate_limit_until_s);
         bool fetched = false;
 
@@ -217,6 +241,10 @@ static void refresh_task(void *arg)
 
         if (s_state->watchlist_count == 0) {
             for (uint32_t i = 0; i < delay_sec; i++) {
+                if (s_force_refresh_requested) {
+                    break;
+                }
+
                 int64_t now = esp_timer_get_time();
                 int64_t now_loop_s = now / 1000000;
                 uint32_t age_s = last_success > 0 ? (uint32_t)((now - last_success) / 1000000) : 0;
@@ -395,6 +423,10 @@ static void refresh_task(void *arg)
 #endif
 
         for (uint32_t i = 0; i < delay_sec; i++) {
+            if (s_force_refresh_requested) {
+                break;
+            }
+
             int64_t now = esp_timer_get_time();
             int64_t now_s = now / 1000000;
             uint32_t age_s = last_success > 0 ? (uint32_t)((now - last_success) / 1000000) : 0;
@@ -450,6 +482,15 @@ void scheduler_set_paused(bool paused)
 {
     s_paused = paused;
     ESP_LOGI(TAG, "Scheduler %s", paused ? "paused" : "resumed");
+}
+
+void scheduler_request_immediate_refresh(void)
+{
+#if !CT_SCHEDULER_ENABLE
+    return;
+#endif
+
+    s_force_refresh_requested = true;
 }
 
 bool scheduler_is_portfolio_data_ready(void)

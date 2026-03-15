@@ -31,6 +31,14 @@ static esp_lcd_touch_handle_t s_touch = NULL;
 static esp_lcd_touch_io_gt911_config_t s_gt911_cfg = {0};
 static lv_point_t s_raw_point = {0};
 
+#ifndef CT_TOUCH_LONG_PRESS_TIME_MS
+#define CT_TOUCH_LONG_PRESS_TIME_MS 500
+#endif
+
+#ifndef CT_TOUCH_LONG_PRESS_REPEAT_MS
+#define CT_TOUCH_LONG_PRESS_REPEAT_MS 1000
+#endif
+
 static touch_calibration_t s_default_calibration = {
     .cal_x_min = CT_TOUCH_CAL_X_MIN,
     .cal_x_max = CT_TOUCH_CAL_X_MAX,
@@ -535,6 +543,8 @@ esp_err_t touch_driver_init(void)
     lv_indev_drv_init(&s_indev_drv);
     s_indev_drv.type = LV_INDEV_TYPE_POINTER;
     s_indev_drv.read_cb = touch_read_cb;
+    s_indev_drv.long_press_time = CT_TOUCH_LONG_PRESS_TIME_MS;
+    s_indev_drv.long_press_repeat_time = CT_TOUCH_LONG_PRESS_REPEAT_MS;
     s_indev = lv_indev_drv_register(&s_indev_drv);
     if (!s_indev) {
         // LVGL indev register failed

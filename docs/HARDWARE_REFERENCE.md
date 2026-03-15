@@ -25,12 +25,14 @@ HARDWARE FACTS (must follow):
 - Timing (CrowPanel Advance 7"): HSYNC 4/40/40, VSYNC 10/30/1, `pclk_active_neg=1`.
 - Bounce buffer enabled to avoid rolling.
 - LVGL vertical compensation: `ver_res = 480 + 40`, `offset_y = -40`.
+- Button shadow rendering was reduced from heavier earlier values to improve long-session redraw stability.
 
 ### Touch
 - Driver: `esp_lcd_touch` + `esp_lcd_touch_gt911` (vendored in `components/`).
 - I2C address: 0x5D, INT: GPIO1.
 - INT wake pulse required before init on this panel.
 - GT911 register address swap should be disabled when using `esp_lcd_panel_io_i2c`.
+- Touch long-press timing is configured explicitly in software.
 
 ### Touch Calibration Strategy
 - Use physical vs. LVGL target height split:
@@ -40,6 +42,14 @@ HARDWARE FACTS (must follow):
 - Calibration ranges are applied before offset:
   - `CT_TOUCH_CAL_X_MIN/MAX`, `CT_TOUCH_CAL_Y_MIN/MAX`.
 - If touch drifts lower at the bottom, increase `CT_TOUCH_CAL_Y_MAX` in small steps.
+- Chart time labels use local time through the `CT_LOCAL_TZ` build flag.
+
+## Stability Notes (v2.0)
+
+- CoinGecko HTTPS requests are serialized to avoid concurrent TLS heap spikes.
+- Coin Detail chart loading is async-first with a loading overlay.
+- News screen objects are transient and must be cleared on delete events.
+- Demo Portfolio toggles should trigger immediate market refreshes so real holdings restore cleanly.
 
 SOFTWARE STACK:
 - ESP-IDF project in PlatformIO.

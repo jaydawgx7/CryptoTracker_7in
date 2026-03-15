@@ -70,18 +70,18 @@ static void update_button_shadow_style(void)
     }
 
     if (s_buttons_3d) {
-        int16_t width = 10;
-        int16_t ofs_y = 5;
-        lv_opa_t opa = LV_OPA_80;
+        int16_t width = 4;
+        int16_t ofs_y = 2;
+        lv_opa_t opa = LV_OPA_50;
 
         if (s_shadow_strength == 0) {
-            width = 6;
+            width = 2;
             ofs_y = 1;
-            opa = LV_OPA_80;
+            opa = LV_OPA_30;
         } else if (s_shadow_strength == 1) {
-            width = 8;
-            ofs_y = 3;
-            opa = LV_OPA_80;
+            width = 3;
+            ofs_y = 1;
+            opa = LV_OPA_40;
         }
 
         lv_style_set_shadow_width(&s_button_shadow_style, width);

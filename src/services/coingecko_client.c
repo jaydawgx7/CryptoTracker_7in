@@ -51,6 +51,7 @@ typedef struct {
 
 static chart_cache_entry_t s_chart_cache[6] = {0};
 static SemaphoreHandle_t s_chart_cache_mutex = NULL;
+static SemaphoreHandle_t s_http_mutex = NULL;
 
 static bool is_transient_http_error(esp_err_t err)
 {
@@ -71,6 +72,22 @@ static void unlock_chart_cache(void)
 {
     if (s_chart_cache_mutex) {
         xSemaphoreGive(s_chart_cache_mutex);
+    }
+}
+
+static bool lock_http_client(TickType_t timeout_ticks)
+{
+    if (!s_http_mutex) {
+        return false;
+    }
+
+    return xSemaphoreTake(s_http_mutex, timeout_ticks) == pdTRUE;
+}
+
+static void unlock_http_client(void)
+{
+    if (s_http_mutex) {
+        xSemaphoreGive(s_http_mutex);
     }
 }
 
@@ -130,6 +147,11 @@ static esp_err_t http_get_json(const char *url, char **out)
     *out = NULL;
     esp_err_t last_err = ESP_FAIL;
 
+    if (!lock_http_client(pdMS_TO_TICKS(30000))) {
+        ESP_LOGW(TAG, "HTTP client busy: url=%s", url);
+        return ESP_ERR_TIMEOUT;
+    }
+
     for (int attempt = 0; attempt < HTTP_RETRY_COUNT; attempt++) {
         http_buffer_t buffer = {0};
 
@@ -161,6 +183,7 @@ static esp_err_t http_get_json(const char *url, char **out)
         if (err == ESP_OK && status == 200) {
             esp_http_client_cleanup(client);
             *out = buffer.buf;
+            unlock_http_client();
             return ESP_OK;
         }
 
@@ -176,6 +199,7 @@ static esp_err_t http_get_json(const char *url, char **out)
         esp_http_client_cleanup(client);
 
         if (status == 429) {
+            unlock_http_client();
             return last_err;
         }
 
@@ -184,9 +208,11 @@ static esp_err_t http_get_json(const char *url, char **out)
             continue;
         }
 
+        unlock_http_client();
         return last_err;
     }
 
+    unlock_http_client();
     return last_err;
 }
 
@@ -716,6 +742,14 @@ esp_err_t coingecko_client_init(void)
         s_chart_cache_mutex = xSemaphoreCreateMutex();
         if (!s_chart_cache_mutex) {
             ESP_LOGE(TAG, "Chart cache mutex create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (!s_http_mutex) {
+        s_http_mutex = xSemaphoreCreateMutex();
+        if (!s_http_mutex) {
+            ESP_LOGE(TAG, "HTTP mutex create failed");
             return ESP_ERR_NO_MEM;
         }
     }

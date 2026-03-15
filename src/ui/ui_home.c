@@ -35,6 +35,9 @@
 
 #define HOME_MODAL_TEXT_COLOR home_accent_color()
 #define HOME_MODAL_BTN_BG 0x222222
+#define HOME_ROW_DRAG_THRESHOLD_PX 12
+#define HOME_ROW_LONG_PRESS_MS 500
+#define HOME_ROW_LONG_PRESS_POLL_MS 50
 
 static const app_state_t *s_state = NULL;
 static lv_obj_t *s_table_body = NULL;
@@ -102,11 +105,23 @@ typedef struct {
     uint32_t color_7d;
     uint32_t color_hold;
     uint32_t color_value;
+    lv_timer_t *long_press_timer;
+    int64_t press_started_ms;
+    int16_t press_x;
+    int16_t press_y;
+    bool press_active;
+    bool touch_moved;
+    bool long_press_fired;
 } home_row_t;
 
 static home_row_t s_rows[MAX_WATCHLIST] = {0};
 static size_t s_row_count = 0;
 static double s_last_prices[MAX_WATCHLIST] = {0};
+static bool s_offline = false;
+static bool s_list_scroll_active = false;
+static int64_t s_list_scroll_holdoff_until_ms = 0;
+
+static void show_actions_modal(size_t index);
 
 static void reset_rows(void)
 {
@@ -114,6 +129,10 @@ static void reset_rows(void)
         if (s_rows[i].flash_timer) {
             lv_timer_del(s_rows[i].flash_timer);
             s_rows[i].flash_timer = NULL;
+        }
+        if (s_rows[i].long_press_timer) {
+            lv_timer_del(s_rows[i].long_press_timer);
+            s_rows[i].long_press_timer = NULL;
         }
         s_rows[i].row = NULL;
         s_rows[i].label_symbol = NULL;
@@ -139,8 +158,74 @@ static void reset_rows(void)
         s_rows[i].color_7d = 0;
         s_rows[i].color_hold = 0;
         s_rows[i].color_value = 0;
+        s_rows[i].press_started_ms = 0;
+        s_rows[i].press_x = 0;
+        s_rows[i].press_y = 0;
+        s_rows[i].press_active = false;
+        s_rows[i].touch_moved = false;
+        s_rows[i].long_press_fired = false;
     }
     s_row_count = 0;
+}
+
+static void cancel_row_long_press(home_row_t *row)
+{
+    if (!row) {
+        return;
+    }
+
+    if (row->long_press_timer) {
+        lv_timer_del(row->long_press_timer);
+        row->long_press_timer = NULL;
+    }
+}
+
+static void cancel_all_row_long_press(void)
+{
+    for (size_t i = 0; i < s_row_count; i++) {
+        cancel_row_long_press(&s_rows[i]);
+        s_rows[i].press_active = false;
+    }
+}
+
+static void row_long_press_timer_cb(lv_timer_t *timer)
+{
+    home_row_t *row = timer ? (home_row_t *)timer->user_data : NULL;
+    if (!row) {
+        if (timer) {
+            lv_timer_del(timer);
+        }
+        return;
+    }
+
+    if (!row->row || !lv_obj_is_valid(row->row) || !row->press_active) {
+        cancel_row_long_press(row);
+        return;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (row->touch_moved) {
+        cancel_row_long_press(row);
+        return;
+    }
+
+    if (s_list_scroll_active || (s_table_body && lv_obj_is_scrolling(s_table_body)) ||
+        now_ms < s_list_scroll_holdoff_until_ms ||
+        (now_ms - row->press_started_ms) < HOME_ROW_LONG_PRESS_MS) {
+        return;
+    }
+
+    row->press_active = false;
+    row->long_press_fired = true;
+    s_long_press_active = true;
+    s_ignore_click = true;
+    cancel_row_long_press(row);
+    show_actions_modal(row->coin_index);
+
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev) {
+        lv_indev_wait_release(indev);
+    }
 }
 
 static const char *s_sort_texts[6] = {"Sym", "Price", "1h", "24h", "7d", "Value"};
@@ -152,9 +237,6 @@ static lv_color_t color_pos = {0};
 static lv_color_t color_neg = {0};
 static lv_color_t color_neutral = {0};
 static lv_color_t color_stale = {0};
-static bool s_offline = false;
-static bool s_list_scroll_active = false;
-static int64_t s_list_scroll_holdoff_until_ms = 0;
 
 static void show_holdings_modal(size_t index);
 static void show_alerts_modal(size_t index);
@@ -910,6 +992,7 @@ static void row_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     size_t index = (size_t)(uintptr_t)lv_event_get_user_data(e);
     home_row_t *row = find_row_by_obj(lv_event_get_target(e));
+    int64_t now_ms = esp_timer_get_time() / 1000;
     if (row) {
         index = row->coin_index;
     }
@@ -919,21 +1002,67 @@ static void row_event_cb(lv_event_t *e)
         return;
     }
 
-    if (code == LV_EVENT_LONG_PRESSED) {
-        s_long_press_active = true;
-        s_ignore_click = true;
-        show_actions_modal(index);
-        lv_indev_t *indev = lv_indev_get_act();
-        if (indev) {
-            lv_indev_reset(indev, NULL);
-            lv_indev_wait_release(indev);
+    if (code == LV_EVENT_PRESSED) {
+        if (row) {
+            lv_indev_t *indev = lv_indev_get_act();
+            lv_point_t p = {0};
+            cancel_row_long_press(row);
+            if (indev) {
+                lv_indev_get_point(indev, &p);
+            }
+            row->press_started_ms = now_ms;
+            row->press_x = p.x;
+            row->press_y = p.y;
+            row->press_active = true;
+            row->touch_moved = false;
+            row->long_press_fired = false;
+            row->long_press_timer = lv_timer_create(row_long_press_timer_cb, HOME_ROW_LONG_PRESS_POLL_MS, row);
         }
-        lv_event_stop_bubbling(e);
-        lv_event_stop_processing(e);
+        s_long_press_active = false;
+        s_ignore_click = false;
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSING) {
+        if (row) {
+            lv_indev_t *indev = lv_indev_get_act();
+            lv_point_t p = {0};
+            if (indev) {
+                lv_indev_get_point(indev, &p);
+                int dx = p.x - row->press_x;
+                int dy = p.y - row->press_y;
+                if (dx < 0) {
+                    dx = -dx;
+                }
+                if (dy < 0) {
+                    dy = -dy;
+                }
+                if (dx >= HOME_ROW_DRAG_THRESHOLD_PX || dy >= HOME_ROW_DRAG_THRESHOLD_PX) {
+                    cancel_row_long_press(row);
+                    row->touch_moved = true;
+                    s_ignore_click = true;
+                }
+            }
+        }
+
+        if (s_list_scroll_active || (s_table_body && lv_obj_is_scrolling(s_table_body))) {
+            if (row) {
+                cancel_row_long_press(row);
+                row->touch_moved = true;
+            }
+            s_ignore_click = true;
+        }
         return;
     }
 
     if (code == LV_EVENT_PRESS_LOST) {
+        if (row) {
+            cancel_row_long_press(row);
+            row->press_active = false;
+        }
+        if (row && row->touch_moved) {
+            s_list_scroll_holdoff_until_ms = now_ms + 250;
+        }
         if (s_long_press_active) {
             s_long_press_active = false;
             s_ignore_click = false;
@@ -941,13 +1070,47 @@ static void row_event_cb(lv_event_t *e)
         }
     }
 
+    if (code == LV_EVENT_RELEASED) {
+        bool treat_as_long_press = false;
+        if (row) {
+            int64_t press_duration_ms = now_ms - row->press_started_ms;
+            treat_as_long_press = !row->touch_moved && !row->long_press_fired &&
+                                  press_duration_ms >= HOME_ROW_LONG_PRESS_MS &&
+                                  now_ms >= s_list_scroll_holdoff_until_ms;
+            cancel_row_long_press(row);
+            row->press_active = false;
+        }
+        if (row && treat_as_long_press) {
+            row->long_press_fired = true;
+            s_long_press_active = true;
+            s_ignore_click = true;
+            show_actions_modal(index);
+            lv_event_stop_bubbling(e);
+            lv_event_stop_processing(e);
+            return;
+        }
+        if (row && row->touch_moved) {
+            s_list_scroll_holdoff_until_ms = now_ms + 250;
+            s_ignore_click = true;
+        }
+        return;
+    }
+
     if (code == LV_EVENT_CLICKED) {
-        if (s_ignore_click || s_long_press_active) {
+        if ((row && (row->touch_moved || row->long_press_fired)) || s_ignore_click || s_long_press_active || now_ms < s_list_scroll_holdoff_until_ms) {
+            if (row) {
+                row->touch_moved = false;
+                row->long_press_fired = false;
+            }
             s_ignore_click = false;
             s_long_press_active = false;
             lv_event_stop_bubbling(e);
             lv_event_stop_processing(e);
             return;
+        }
+        if (row) {
+            row->touch_moved = false;
+            row->long_press_fired = false;
         }
         ui_nav_set_back_target(UI_NAV_HOME);
         ui_show_coin_detail(index);
@@ -1196,6 +1359,13 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
         row->color_7d = 0;
         row->color_hold = 0;
         row->color_value = 0;
+        row->long_press_timer = NULL;
+        row->press_started_ms = 0;
+        row->press_x = 0;
+        row->press_y = 0;
+        row->press_active = false;
+        row->touch_moved = false;
+        row->long_press_fired = false;
     }
 
     if (!row->row) {
@@ -1216,6 +1386,12 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
         lv_obj_set_style_pad_column(row->row, 6, 0);
         lv_obj_clear_flag(row->row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(row->row, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_bg_color(row->row, lv_color_hex(0x1B2433), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(row->row, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_set_style_outline_width(row->row, 2, LV_STATE_PRESSED);
+        lv_obj_set_style_outline_color(row->row, lv_color_hex(home_accent_color()), LV_STATE_PRESSED);
+        lv_obj_set_style_outline_opa(row->row, LV_OPA_70, LV_STATE_PRESSED);
+        lv_obj_set_style_outline_pad(row->row, 0, LV_STATE_PRESSED);
 
         row->label_symbol = create_cell(row->row, "", s_col_widths[0], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_LEFT);
         row->label_price = create_cell(row->row, "", s_col_widths[1], lv_color_hex(0xE6E6E6), LV_TEXT_ALIGN_RIGHT);
@@ -1263,8 +1439,11 @@ static void update_row(home_row_t *row, const coin_t *coin, size_t coin_index, s
 
     if (row->coin_index != coin_index) {
         lv_obj_remove_event_cb(row->row, row_event_cb);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)coin_index);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_PRESSING, (void *)(uintptr_t)coin_index);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)coin_index);
+        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)coin_index);
         lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)coin_index);
-        lv_obj_add_event_cb(row->row, row_event_cb, LV_EVENT_LONG_PRESSED, (void *)(uintptr_t)coin_index);
         row->coin_index = coin_index;
     }
 
@@ -1542,6 +1721,7 @@ static void table_scroll_event(lv_event_t *e)
     int64_t now_ms = esp_timer_get_time() / 1000;
 
     if (code == LV_EVENT_SCROLL_BEGIN) {
+        cancel_all_row_long_press();
         s_list_scroll_active = true;
         return;
     }

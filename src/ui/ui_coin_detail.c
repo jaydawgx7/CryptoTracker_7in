@@ -62,6 +62,9 @@ static lv_obj_t *s_holdings = NULL;
 static lv_obj_t *s_chart = NULL;
 static lv_chart_series_t *s_series = NULL;
 static lv_obj_t *s_status = NULL;
+static lv_obj_t *s_loading_overlay = NULL;
+static lv_obj_t *s_loading_spinner = NULL;
+static lv_obj_t *s_loading_label = NULL;
 static lv_obj_t *s_footer_updated = NULL;
 static lv_timer_t *s_footer_timer = NULL;
 static lv_obj_t *s_range_buttons[RANGE_BUTTON_COUNT] = {0};
@@ -104,6 +107,8 @@ static int range_to_days(chart_range_t range);
 static void set_chart_data(const chart_point_t *points, size_t count);
 static void request_chart(void);
 static void hide_tooltip(void);
+static void set_chart_loading_state(bool loading, const char *message);
+static void reset_chart_visual(void);
 
 static void set_label_text_if_changed(lv_obj_t *label, const char *text)
 {
@@ -124,6 +129,23 @@ static void free_chart_points(chart_point_t *points)
     free(points);
 }
 
+static esp_err_t duplicate_chart_points_local(const chart_point_t *src, size_t count, chart_point_t **out_points, size_t *out_count)
+{
+    if (!src || !out_points || !out_count || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    chart_point_t *copy = calloc(count, sizeof(chart_point_t));
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(copy, src, count * sizeof(chart_point_t));
+    *out_points = copy;
+    *out_count = count;
+    return ESP_OK;
+}
+
 static void reset_screen_handles(void)
 {
     s_screen = NULL;
@@ -133,6 +155,9 @@ static void reset_screen_handles(void)
     s_chart = NULL;
     s_series = NULL;
     s_status = NULL;
+    s_loading_overlay = NULL;
+    s_loading_spinner = NULL;
+    s_loading_label = NULL;
     s_footer_updated = NULL;
     s_y_axis = NULL;
     s_x_axis = NULL;
@@ -180,9 +205,47 @@ static void clear_chart_cache(void)
     s_chart_needs_render = true;
 }
 
+static void set_chart_loading_state(bool loading, const char *message)
+{
+    if (s_loading_overlay) {
+        if (loading) {
+            lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_loading_overlay);
+        } else {
+            lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (s_loading_label && message) {
+        lv_label_set_text(s_loading_label, message);
+    }
+}
+
+static void reset_chart_visual(void)
+{
+    hide_tooltip();
+
+    if (s_chart && s_series) {
+        lv_chart_set_point_count(s_chart, 2);
+        lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
+        lv_chart_set_value_by_id(s_chart, s_series, 0, 500);
+        lv_chart_set_value_by_id(s_chart, s_series, 1, 500);
+        lv_chart_refresh(s_chart);
+    }
+
+    for (int i = 0; i < Y_LABEL_COUNT; i++) {
+        set_label_text_if_changed(s_y_labels[i], "--");
+    }
+
+    for (int i = 0; i < X_LABEL_COUNT; i++) {
+        set_label_text_if_changed(s_x_labels[i], "--");
+    }
+}
+
 void ui_coin_detail_release_resources(void)
 {
     s_loading = false;
+    set_chart_loading_state(false, "Loading chart...");
     hide_tooltip();
     clear_chart_cache();
 }
@@ -229,9 +292,16 @@ static bool load_chart_from_service_cache(const coin_t *coin)
         return false;
     }
 
+    const chart_point_t *cached_points = NULL;
+    size_t cached_count = 0;
+    if (coingecko_client_get_chart_cached(coin->id, range_to_days(s_range), &cached_points, &cached_count) != ESP_OK ||
+        !cached_points || cached_count < 2) {
+        return false;
+    }
+
     chart_point_t *points = NULL;
     size_t count = 0;
-    if (coingecko_client_copy_chart(coin->id, range_to_days(s_range), &points, &count) != ESP_OK || !points || count < 2) {
+    if (duplicate_chart_points_local(cached_points, cached_count, &points, &count) != ESP_OK || !points || count < 2) {
         free_chart_points(points);
         return false;
     }
@@ -761,6 +831,8 @@ static void set_chart_data(const chart_point_t *points, size_t count)
         return;
     }
 
+    set_chart_loading_state(false, "Loading chart...");
+
     int64_t latest_ts = points[count - 1].ts_ms;
     int64_t cutoff = 0;
     if (s_range == RANGE_1H) {
@@ -856,6 +928,7 @@ static void chart_ready_cb(void *arg)
 
     if (!s_state || s_coin_index >= s_state->watchlist_count) {
         s_loading = false;
+        set_chart_loading_state(false, "Loading chart...");
         free_chart_points(ctx->points);
         free(ctx);
         return;
@@ -863,6 +936,7 @@ static void chart_ready_cb(void *arg)
 
     if (!chart_matches_current_target(ctx)) {
         s_loading = false;
+        set_chart_loading_state(false, "Loading chart...");
         free_chart_points(ctx->points);
         free(ctx);
         request_chart();
@@ -873,6 +947,8 @@ static void chart_ready_cb(void *arg)
         adopt_chart_data(ctx->points, ctx->count, ctx->coin_id, ctx->range);
         ctx->points = NULL;
     } else {
+        reset_chart_visual();
+        set_chart_loading_state(false, "Loading chart...");
         set_label_text_if_changed(s_status, "Chart load failed");
     }
 
@@ -906,6 +982,7 @@ static void request_chart(void)
             set_chart_data(s_chart_points, s_chart_count);
             s_chart_needs_render = false;
         }
+        set_chart_loading_state(false, "Loading chart...");
         set_label_text_if_changed(s_status, "");
         return;
     }
@@ -928,11 +1005,14 @@ static void request_chart(void)
     ctx->range = s_range;
     s_loading = true;
     s_chart_request_started_us = now_us;
+    reset_chart_visual();
+    set_chart_loading_state(true, "Loading chart...");
     set_label_text_if_changed(s_status, "Loading chart...");
 
     BaseType_t ok = xTaskCreate(chart_task, "chart_fetch", 6144, ctx, 5, NULL);
     if (ok != pdPASS) {
         s_loading = false;
+        set_chart_loading_state(false, "Loading chart...");
         set_label_text_if_changed(s_status, "Chart task failed");
         free(ctx);
     }
@@ -969,6 +1049,7 @@ void ui_coin_detail_show_index(size_t index)
     if (coin_changed) {
         hide_tooltip();
         clear_chart_cache();
+        reset_chart_visual();
     }
     update_header_values();
     update_range_buttons();
@@ -1128,6 +1209,38 @@ lv_obj_t *ui_coin_detail_screen_create(void)
     lv_label_set_text(s_status, "");
     lv_obj_set_style_text_color(s_status, lv_color_hex(0x9AA1AD), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 16, 338);
+
+    s_loading_overlay = lv_obj_create(s_screen);
+    lv_obj_set_size(s_loading_overlay, 240, 92);
+    lv_obj_center(s_loading_overlay);
+    lv_obj_set_style_bg_color(s_loading_overlay, lv_color_hex(0x05070B), 0);
+    lv_obj_set_style_bg_opa(s_loading_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_color(s_loading_overlay, lv_color_hex(0x2A3142), 0);
+    lv_obj_set_style_border_opa(s_loading_overlay, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_loading_overlay, 1, 0);
+    lv_obj_set_style_radius(s_loading_overlay, 14, 0);
+    lv_obj_set_style_pad_all(s_loading_overlay, 12, 0);
+    lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_loading_overlay, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_loading_overlay);
+
+    s_loading_spinner = lv_spinner_create(s_loading_overlay, 1600, 72);
+    lv_obj_set_size(s_loading_spinner, 34, 34);
+    lv_obj_set_style_arc_width(s_loading_spinner, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_loading_spinner, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_loading_spinner, lv_color_hex(0x1F2633), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_loading_spinner, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_loading_spinner, lv_color_hex(theme ? theme->accent : 0x00FE8F), LV_PART_INDICATOR);
+    lv_obj_align(s_loading_spinner, LV_ALIGN_TOP_MID, 0, 6);
+
+    s_loading_label = lv_label_create(s_loading_overlay);
+    lv_label_set_text(s_loading_label, "Loading chart...");
+    lv_obj_set_width(s_loading_label, 208);
+    lv_obj_set_style_text_align(s_loading_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(s_loading_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_loading_label, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_align(s_loading_label, LV_ALIGN_BOTTOM_MID, 0, -8);
 
     s_footer_updated = lv_label_create(s_screen);
     lv_label_set_text(s_footer_updated, "Updated: --");

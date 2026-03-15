@@ -40,6 +40,7 @@ typedef struct {
     lv_obj_t *metric;
     lv_obj_t *extra;
     size_t coin_index;
+    bool suppress_next_click;
 } dash_item_row_t;
 
 static const app_state_t *s_state = NULL;
@@ -534,8 +535,22 @@ static void coin_row_click_event(lv_event_t *e)
     if (!row || !s_state || row->coin_index >= s_state->watchlist_count) {
         return;
     }
+    if (row->suppress_next_click) {
+        row->suppress_next_click = false;
+        return;
+    }
     ui_nav_set_back_target(UI_NAV_DASHBOARD);
     ui_show_coin_detail(row->coin_index);
+}
+
+static void coin_row_press_event(lv_event_t *e)
+{
+    dash_item_row_t *row = (dash_item_row_t *)lv_event_get_user_data(e);
+    if (!row) {
+        return;
+    }
+
+    row->suppress_next_click = false;
 }
 
 static size_t find_dashboard_coin_index(const char *coin_id, const char *symbol)
@@ -576,6 +591,7 @@ static void coin_row_long_press_event(lv_event_t *e)
     if (!row || !s_state || row->coin_index >= s_state->watchlist_count) {
         return;
     }
+    row->suppress_next_click = true;
     ui_home_open_holdings_editor(row->coin_index);
 }
 
@@ -639,6 +655,7 @@ static void create_item_row(dash_item_row_t *row, lv_obj_t *parent, lv_coord_t y
 
     row->coin_index = SIZE_MAX;
 
+    lv_obj_add_event_cb(row->btn, coin_row_press_event, LV_EVENT_PRESSED, row);
     lv_obj_add_event_cb(row->btn, coin_row_click_event, LV_EVENT_CLICKED, row);
     lv_obj_add_event_cb(row->btn, coin_row_long_press_event, LV_EVENT_LONG_PRESSED, row);
 }
